@@ -2,6 +2,34 @@
 
 Fresh implementation of the AHP (Agentic Host Platform) — Go backend, separated service roles, PostgreSQL/pgvector, Redis, MinIO, Vault.
 
+## Посервисный каталог
+
+Все компоненты находятся в этом репозитории. Команды сборки и запуска приведены в [Quick Start](#quick-start).
+
+| Компонент | Где открыть код |
+|---|---|
+| **Новый State Store** | [Хранилище](internal/statejournal) · [схема PostgreSQL](internal/statejournal/schema.sql) |
+| **Новый State API** | [Точка входа](cmd/state-api) · [HTTP API](internal/statejournal/http.go) · [запуск и настройка](docs/compact-state-service.md) |
+| **Адаптеры харнессов** | [LangGraph](sdk/python/ahp_state/journal_checkpointer.py) · [ADK](sdk/python/ahp_state/journal_adk.py) · [DeepSeek](adapters/deepseek) · [Hermes](adapters/hermes) · [OpenClaw](adapters/openclaw) · [проверки восстановления](profiling/state-journal) |
+| State API для thread/run | [HTTP API](internal/stateapi) · [хранилище](internal/state) |
+| Identity | [Сервис](internal/identity) · [HTTP API](internal/identityapi) |
+| Model Gateway | [Маршрутизация и провайдеры](internal/model) · [HTTP API](internal/modelapi) |
+| Tool Gateway | [Инструменты и журнал операций](internal/tools) |
+| Artifacts | [Хранилище](internal/artifacts) · [HTTP API](internal/artifactsapi) · [парсер](cmd/artifact-parser) |
+| Memory | [Сервис памяти](internal/memory) · [настройка](infra/memory) |
+| Workspace | [Управление рабочими каталогами](internal/workspace) |
+| Compute | [Управление вычислениями и песочницами](internal/compute) · [compute host](cmd/compute-host) |
+| Registry | [Деплойменты и регистрация агентов](internal/registry) |
+| Execution и A2A | [Исполнение](internal/executor) · [A2A gateway](internal/gateway) · [связь с раннерами](internal/execbridge) |
+| Triggers | [Задания по расписанию и событиям](internal/triggers) |
+| Evals | [Оценка агентов](internal/evals) |
+| Agents Space | [Серверная логика](internal/space) · [раннер](cmd/as-runner) |
+| Agent Runtime | [Агент](cmd/ahp-agent) · [образ](infra/agent-workload) · [интеграция Emil](adapters/emil) |
+| SDK | [Go](sdk/go) · [Python](sdk/python) · [TypeScript](sdk/ts) · [примеры](sdk/examples) |
+| Frontend | [Интерфейс](web/aifactory) |
+| Общие библиотеки и запуск платформы | [Контракты и библиотеки](pkg) · [процесс ahp](cmd/ahp) |
+| Deploy и интеграция | [Контроллер деплоя](internal/deploycontroller) · [манифесты](infra/manifests) · [Compose](compose.yaml) · [тесты](tests) |
+
 ## Requirements
 
 - Go 1.26+
