@@ -1,0 +1,21 @@
+[Unit]
+Description=AHP state service
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/ahp --role state --listen 127.0.0.1:8081
+EnvironmentFile=/etc/ahp/state.env
+Restart=always
+RestartSec=3
+NotifyAccess=main
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ahp/state
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

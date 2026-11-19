@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ahp-langgraph"
+version = "0.1.0"
+description = "AHP platform adapter for LangGraph: State API checkpointer and store"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+langgraph = ["langgraph==0.6.11", "langgraph-checkpoint==2.1.2", "langchain-core>=0.3"]
+adk = ["google-adk==2.14.0"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "respx>=0.21"]
+
+[project.scripts]
+# the CI gate for a candidate agent image (PDF §4.2): `ahp-sdk-check ./my_agent`
+ahp-sdk-check = "ahp_state.check.__main__:main"
+# the process the platform starts inside the image (PDF §2.3)
+ahp-agent-container = "ahp_state.container.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["ahp_state*", "ahp_memory*", "ahp_clients*"]
+# The harness is not part of what a container installs or runs. It listens on
+# sockets, spawns processes and (raw_pg) reads the stand's PostgreSQL directly,
+# which the platform's own rule list (ahp_state/check: EGRESS_ROOTS, DB_ROOTS)
+# counts as a side channel for a user agent. Keeping it out of the wheel is what
+# makes "the image owns the graph, the SDK owns the contract" literally true.
+exclude = ["ahp_state.tests", "ahp_state.tests.*", "ahp_memory.tests", "ahp_memory.tests.*", "ahp_clients.tests", "ahp_clients.tests.*"]
+
+[tool.pytest.ini_options]
+# The adapter suite mixes sync and async tests; auto mode keeps the sync
+# interface tests (PDF §3/§4.2 require them to be functional) runnable without
+# decorating every coroutine, and keeps every test file honest about its scope.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests", "ahp_state/tests"]

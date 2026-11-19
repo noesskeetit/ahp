@@ -1,0 +1,526 @@
+{
+  "source_checkpoint": "7c810ec2aa5d0d650205807f6d0e12489fd0fe62",
+  "target_base": "19b63686c2264eb73c1ff067bf350ba93229006e",
+  "method": "reverse exact feature HEAD-parent diffs; three-way merge for modified target files",
+  "files": [
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "README.md",
+      "source_path": "docs/memory/colleague/README.md",
+      "method": "applied"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "VALIDATION.md",
+      "source_path": "docs/memory/colleague/VALIDATION.md",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "ahpbridge/access.go",
+      "source_path": "internal/memory/ahpbridge/access.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "ahpbridge/access_test.go",
+      "source_path": "internal/memory/ahpbridge/access_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "ahpbridge/completion.go",
+      "source_path": "internal/memory/ahpbridge/completion.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "ahpbridge/completion_test.go",
+      "source_path": "internal/memory/ahpbridge/completion_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "ahpbridge/handler.go",
+      "source_path": "internal/memory/ahpbridge/handler.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "ahpbridge/handler_test.go",
+      "source_path": "internal/memory/ahpbridge/handler_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "ahpbridge/rpc.go",
+      "source_path": "internal/memory/ahpbridge/rpc.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "ahpbridge/workspace.go",
+      "source_path": "internal/memory/ahpbridge/workspace.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "hindsight/client.go",
+      "source_path": "internal/memory/hindsight/client.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "hindsight/client_test.go",
+      "source_path": "internal/memory/hindsight/client_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/IMPORT.json",
+      "source_path": "internal/memory/longterm/IMPORT.json",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/binding.go",
+      "source_path": "internal/memory/longterm/binding.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/erase.go",
+      "source_path": "internal/memory/longterm/erase.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/flush.go",
+      "source_path": "internal/memory/longterm/flush.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/httpapi/dev_access_test.go",
+      "source_path": "internal/memory/longterm/httpapi/dev_access_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/httpapi/server.go",
+      "source_path": "internal/memory/longterm/httpapi/server.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/httpapi/server_test.go",
+      "source_path": "internal/memory/longterm/httpapi/server_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/integration_policy_test.go",
+      "source_path": "internal/memory/longterm/integration_policy_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/list.go",
+      "source_path": "internal/memory/longterm/list.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/memstore.go",
+      "source_path": "internal/memory/longterm/memstore.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/missions.go",
+      "source_path": "internal/memory/longterm/missions.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/pgstore/store.go",
+      "source_path": "internal/memory/longterm/pgstore/store.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/pgstore/store_test.go",
+      "source_path": "internal/memory/longterm/pgstore/store_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/pgstore/tenant.go",
+      "source_path": "internal/memory/longterm/pgstore/tenant.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/pgstore/tenant_test.go",
+      "source_path": "internal/memory/longterm/pgstore/tenant_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/sdk/client.go",
+      "source_path": "internal/memory/longterm/sdk/client.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/sdk/tools.go",
+      "source_path": "internal/memory/longterm/sdk/tools.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/sdk/tools_test.go",
+      "source_path": "internal/memory/longterm/sdk/tools_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/service.go",
+      "source_path": "internal/memory/longterm/service.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/service_test.go",
+      "source_path": "internal/memory/longterm/service_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/source_floor.go",
+      "source_path": "internal/memory/longterm/source_floor.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/status.go",
+      "source_path": "internal/memory/longterm/status.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/tenant.go",
+      "source_path": "internal/memory/longterm/tenant.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/tenant_test.go",
+      "source_path": "internal/memory/longterm/tenant_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/types.go",
+      "source_path": "internal/memory/longterm/types.go",
+      "method": "added"
+    },
+    {
+      "repository": "memory-service",
+      "revision": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c",
+      "export_path": "longterm/worker.go",
+      "source_path": "internal/memory/longterm/worker.go",
+      "method": "added"
+    },
+    {
+      "repository": "state-service",
+      "revision": "97082db267be647dfb7269e7934541a3a117ea43",
+      "export_path": "state/completion.go",
+      "source_path": "internal/state/completion.go",
+      "method": "added"
+    },
+    {
+      "repository": "state-service",
+      "revision": "97082db267be647dfb7269e7934541a3a117ea43",
+      "export_path": "state/completion_test.go",
+      "source_path": "internal/state/completion_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "state-service",
+      "revision": "97082db267be647dfb7269e7934541a3a117ea43",
+      "export_path": "state/evidence.go",
+      "source_path": "internal/state/evidence.go",
+      "method": "added"
+    },
+    {
+      "repository": "state-service",
+      "revision": "97082db267be647dfb7269e7934541a3a117ea43",
+      "export_path": "state/store.go",
+      "source_path": "internal/state/store.go",
+      "method": "applied"
+    },
+    {
+      "repository": "execution-service",
+      "revision": "3b9a46636a41546b1c6a330002fb569611c387ef",
+      "export_path": "core/memory.go",
+      "source_path": "internal/core/memory.go",
+      "method": "added"
+    },
+    {
+      "repository": "execution-service",
+      "revision": "3b9a46636a41546b1c6a330002fb569611c387ef",
+      "export_path": "core/memory_test.go",
+      "source_path": "internal/core/memory_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "execution-service",
+      "revision": "3b9a46636a41546b1c6a330002fb569611c387ef",
+      "export_path": "core/runtime.go",
+      "source_path": "internal/core/runtime.go",
+      "method": "conflict"
+    },
+    {
+      "repository": "platform-runtime",
+      "revision": "c42b66b4c3226f549a33ea5e6875ea977f0dedc2",
+      "export_path": "cmd/ahp/hindsight_owner_test.go",
+      "source_path": "cmd/ahp/hindsight_owner_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "platform-runtime",
+      "revision": "c42b66b4c3226f549a33ea5e6875ea977f0dedc2",
+      "export_path": "cmd/ahp/hindsight_sources.go",
+      "source_path": "cmd/ahp/hindsight_sources.go",
+      "method": "added"
+    },
+    {
+      "repository": "platform-runtime",
+      "revision": "c42b66b4c3226f549a33ea5e6875ea977f0dedc2",
+      "export_path": "cmd/ahp/main.go",
+      "source_path": "cmd/ahp/main.go",
+      "method": "conflict"
+    },
+    {
+      "repository": "platform-runtime",
+      "revision": "c42b66b4c3226f549a33ea5e6875ea977f0dedc2",
+      "export_path": "cmd/ahp/memory_identity.go",
+      "source_path": "cmd/ahp/memory_identity.go",
+      "method": "added"
+    },
+    {
+      "repository": "platform-runtime",
+      "revision": "c42b66b4c3226f549a33ea5e6875ea977f0dedc2",
+      "export_path": "cmd/ahp/mount_hindsight.go",
+      "source_path": "cmd/ahp/mount_hindsight.go",
+      "method": "added"
+    },
+    {
+      "repository": "platform-runtime",
+      "revision": "c42b66b4c3226f549a33ea5e6875ea977f0dedc2",
+      "export_path": "cmd/ahp/mount_memory.go",
+      "source_path": "cmd/ahp/mount_memory.go",
+      "method": "applied"
+    },
+    {
+      "repository": "platform-runtime",
+      "revision": "c42b66b4c3226f549a33ea5e6875ea977f0dedc2",
+      "export_path": "cmd/ahp/mount_memory_test.go",
+      "source_path": "cmd/ahp/mount_memory_test.go",
+      "method": "applied"
+    },
+    {
+      "repository": "platform-runtime",
+      "revision": "c42b66b4c3226f549a33ea5e6875ea977f0dedc2",
+      "export_path": "cmd/ahp/state_completion.go",
+      "source_path": "cmd/ahp/state_completion.go",
+      "method": "added"
+    },
+    {
+      "repository": "platform-runtime",
+      "revision": "c42b66b4c3226f549a33ea5e6875ea977f0dedc2",
+      "export_path": "cmd/as-runner/main.go",
+      "source_path": "cmd/as-runner/main.go",
+      "method": "conflict"
+    },
+    {
+      "repository": "platform-runtime",
+      "revision": "c42b66b4c3226f549a33ea5e6875ea977f0dedc2",
+      "export_path": "cmd/as-runner/memory.go",
+      "source_path": "cmd/as-runner/memory.go",
+      "method": "added"
+    },
+    {
+      "repository": "agents-space",
+      "revision": "75746c3a558c279cd20511fb66a836de3e446ae8",
+      "export_path": "space/coordinator.go",
+      "source_path": "internal/space/coordinator.go",
+      "method": "conflict"
+    },
+    {
+      "repository": "agents-space",
+      "revision": "75746c3a558c279cd20511fb66a836de3e446ae8",
+      "export_path": "space/project.go",
+      "source_path": "internal/space/project.go",
+      "method": "added"
+    },
+    {
+      "repository": "agents-space",
+      "revision": "75746c3a558c279cd20511fb66a836de3e446ae8",
+      "export_path": "space/project_test.go",
+      "source_path": "internal/space/project_test.go",
+      "method": "added"
+    },
+    {
+      "repository": "agents-space",
+      "revision": "75746c3a558c279cd20511fb66a836de3e446ae8",
+      "export_path": "space/turn_history.go",
+      "source_path": "internal/space/turn_history.go",
+      "method": "three-way"
+    },
+    {
+      "repository": "agents-space",
+      "revision": "75746c3a558c279cd20511fb66a836de3e446ae8",
+      "export_path": "space/types.go",
+      "source_path": "internal/space/types.go",
+      "method": "three-way"
+    },
+    {
+      "repository": "agents-space",
+      "revision": "75746c3a558c279cd20511fb66a836de3e446ae8",
+      "export_path": "space/ui_planes.go",
+      "source_path": "internal/space/ui_planes.go",
+      "method": "three-way"
+    },
+    {
+      "repository": "frontend",
+      "revision": "c0d9b7b0359ff1cb2aa7c21f49af0ee1eec053a8",
+      "export_path": "web/aifactory/ahp-live.js",
+      "source_path": "web/aifactory/ahp-live.js",
+      "method": "three-way"
+    },
+    {
+      "repository": "frontend",
+      "revision": "c0d9b7b0359ff1cb2aa7c21f49af0ee1eec053a8",
+      "export_path": "web/aifactory/ahp-shapes.js",
+      "source_path": "web/aifactory/ahp-shapes.js",
+      "method": "three-way"
+    },
+    {
+      "repository": "frontend",
+      "revision": "c0d9b7b0359ff1cb2aa7c21f49af0ee1eec053a8",
+      "export_path": "web/aifactory_memory.test.mjs",
+      "source_path": "web/aifactory_memory.test.mjs",
+      "method": "added"
+    },
+    {
+      "repository": "integration",
+      "revision": "28cdacb5f17610e3cc7f0fb79fa4a4742ac824d6",
+      "export_path": "MEMORY-UPDATE.md",
+      "source_path": "docs/memory/colleague/MEMORY-UPDATE.md",
+      "method": "added"
+    },
+    {
+      "repository": "integration",
+      "revision": "28cdacb5f17610e3cc7f0fb79fa4a4742ac824d6",
+      "export_path": "MEMORY.md",
+      "source_path": "docs/memory/colleague/MEMORY.md",
+      "method": "added"
+    },
+    {
+      "repository": "integration",
+      "revision": "28cdacb5f17610e3cc7f0fb79fa4a4742ac824d6",
+      "export_path": "compose.memory.yaml",
+      "source_path": "infra/memory/compose.hindsight.yaml",
+      "method": "added"
+    },
+    {
+      "repository": "integration",
+      "revision": "28cdacb5f17610e3cc7f0fb79fa4a4742ac824d6",
+      "export_path": "handoff/hindsight-memory-architecture.md",
+      "source_path": "docs/memory/colleague/handoff/hindsight-memory-architecture.md",
+      "method": "added"
+    },
+    {
+      "repository": "integration",
+      "revision": "28cdacb5f17610e3cc7f0fb79fa4a4742ac824d6",
+      "export_path": "handoff/initial-memory-integration-audit.md",
+      "source_path": "docs/memory/colleague/handoff/initial-memory-integration-audit.md",
+      "method": "added"
+    },
+    {
+      "repository": "integration",
+      "revision": "28cdacb5f17610e3cc7f0fb79fa4a4742ac824d6",
+      "export_path": "handoff/memory-integration.md",
+      "source_path": "docs/memory/colleague/handoff/memory-integration.md",
+      "method": "applied"
+    },
+    {
+      "repository": "integration",
+      "revision": "28cdacb5f17610e3cc7f0fb79fa4a4742ac824d6",
+      "export_path": "handoff/readiness-matrix.md",
+      "source_path": "docs/memory/colleague/handoff/readiness-matrix.md",
+      "method": "applied"
+    },
+    {
+      "repository": "integration",
+      "revision": "28cdacb5f17610e3cc7f0fb79fa4a4742ac824d6",
+      "export_path": "memory-change-manifest.json",
+      "source_path": "docs/memory/colleague/memory-change-manifest.json",
+      "method": "added"
+    },
+    {
+      "repository": "integration",
+      "revision": "28cdacb5f17610e3cc7f0fb79fa4a4742ac824d6",
+      "export_path": "memory-revisions.json",
+      "source_path": "docs/memory/colleague/memory-revisions.json",
+      "method": "added"
+    },
+    {
+      "repository": "integration",
+      "revision": "28cdacb5f17610e3cc7f0fb79fa4a4742ac824d6",
+      "export_path": "memory.env.example",
+      "source_path": "infra/memory/memory.env.example",
+      "method": "added"
+    }
+  ],
+  "conflict_resolution": "Preserved current API-only artifact client, profile runtime/config pinner, tenant tool ceiling, output chunk tools; added Memory tools, project binding and State outbox. No role_data changes."
+}

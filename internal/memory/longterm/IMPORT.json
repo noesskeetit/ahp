@@ -1,0 +1,91 @@
+{
+  "source": "services/ahp-memory",
+  "purpose": "Initial import of the agreed personal/project Hindsight engine; integrated copy is canonical for AHP",
+  "files": [
+    {
+      "source": "memory/flush.go",
+      "target": "longterm/flush.go",
+      "source_sha256": "3c904022bb41b50174df20943d3d88cb71cb5047435e4b4c0de194fffd8baef3"
+    },
+    {
+      "source": "memory/memstore.go",
+      "target": "longterm/memstore.go",
+      "source_sha256": "789e8ee20e00ca2012efd131e02f193cd426074e528c501f0b76306c3c485455"
+    },
+    {
+      "source": "memory/missions.go",
+      "target": "longterm/missions.go",
+      "source_sha256": "2de93fe6383c2f4a32707259438dcdde2785ba7b5fb8f89a9a46a11479994fd4"
+    },
+    {
+      "source": "memory/service.go",
+      "target": "longterm/service.go",
+      "source_sha256": "6bc056f8c62e6c02f589bdce40cb9984fa22c5ce624332e772de1f10a0804368"
+    },
+    {
+      "source": "memory/service_test.go",
+      "target": "longterm/service_test.go",
+      "source_sha256": "31bb5daf8b82bb23ada57fb42b513cb54f4bde2cb67dc02912acdcddc98c705f"
+    },
+    {
+      "source": "memory/source_floor.go",
+      "target": "longterm/source_floor.go",
+      "source_sha256": "102f3a5d5ed82ec7456082cbcf12220bb79ac176a3806569d6cbcf191dafc3f4"
+    },
+    {
+      "source": "memory/status.go",
+      "target": "longterm/status.go",
+      "source_sha256": "9198d92dee53970aa6dbc263efff393a55e136a529bb92ba77df3a57923f49ca"
+    },
+    {
+      "source": "memory/types.go",
+      "target": "longterm/types.go",
+      "source_sha256": "2e5018a21dfdc3646de4b4e319ec67a52c7746bc136de9f47ec461833bf3fe1e"
+    },
+    {
+      "source": "memory/worker.go",
+      "target": "longterm/worker.go",
+      "source_sha256": "0e2926207b02526ab7b8670acab81428c8a1fb26750f9727acff9465d3752254"
+    },
+    {
+      "source": "internal/hindsight/client.go",
+      "target": "hindsight/client.go",
+      "source_sha256": "510f9d822fff7dc7ff351bf28ba5ed40c0e251a77794b0ba4672f07637babcb7"
+    },
+    {
+      "source": "internal/hindsight/client_test.go",
+      "target": "hindsight/client_test.go",
+      "source_sha256": "03093583844bd05cde7fdece7ba93988f947d541b07b9719205f1f2ed82e805e"
+    },
+    {
+      "source": "internal/httpapi/server.go",
+      "target": "longterm/httpapi/server.go",
+      "source_sha256": "933b74dad1099a3a27ecbf4b9d895f5fe012a3c8758f9a9384cd28b5ee3bf168"
+    },
+    {
+      "source": "internal/httpapi/server_test.go",
+      "target": "longterm/httpapi/server_test.go",
+      "source_sha256": "9a087425d12b71bab68b18bd5b1c7a45455e83d05aaa6c63a11c80803f51a4c5"
+    },
+    {
+      "source": "internal/postgres/store.go",
+      "target": "longterm/pgstore/store.go",
+      "source_sha256": "0af892a7db80aefb3e0197f9850533ceb04b47b11620a655e1bd3d9ce721be87"
+    },
+    {
+      "source": "internal/postgres/store_test.go",
+      "target": "longterm/pgstore/store_test.go",
+      "source_sha256": "0b2a8bed6da58c18baf043d887932a6189eb6b407e16e85e1b4241a011ee87e4"
+    },
+    {
+      "source": "sdk/client.go",
+      "target": "longterm/sdk/client.go",
+      "source_sha256": "6dd2ebfd1c742ff0e6bb3a66a9e9e319a46a392ea5cfe9342d79944f87d4b467"
+    },
+    {
+      "source": "sdk/tools.go",
+      "target": "longterm/sdk/tools.go",
+      "source_sha256": "699979601e0cbf1c477f549bc9cd48ba4c8a9726bff9a9ed51a153e598e2461e"
+    }
+  ]
+}

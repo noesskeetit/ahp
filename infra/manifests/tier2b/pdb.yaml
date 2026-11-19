@@ -1,0 +1,32 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ahp-state
+  namespace: ahp
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ahp-state
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ahp-identity
+  namespace: ahp
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ahp-identity
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ahp-model
+  namespace: ahp
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ahp-model

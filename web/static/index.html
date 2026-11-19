@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agents Space</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>Agents Space</h1>
+  <span class="tag">thin client of /v1/space/*</span>
+</header>
+
+<section class="subjects">
+  <h2>Subjects (two-subject browser flow)</h2>
+  <div class="subject-grid">
+    <fieldset data-subject="A">
+      <legend>Subject A</legend>
+      <label>Base URL <input data-field="url" value="" placeholder="http://127.0.0.1:8080"></label>
+      <label>Token <input data-field="token" type="password" placeholder="bearer (optional)"></label>
+    </fieldset>
+    <fieldset data-subject="B">
+      <legend>Subject B</legend>
+      <label>Base URL <input data-field="url" value="" placeholder="http://127.0.0.1:8082"></label>
+      <label>Token <input data-field="token" type="password" placeholder="bearer (optional)"></label>
+    </fieldset>
+  </div>
+</section>
+
+<section class="chat">
+  <h2>Chat</h2>
+  <div class="chat-controls">
+    <label>Subject
+      <select id="subject">
+        <option value="A">A</option>
+        <option value="B">B</option>
+      </select>
+    </label>
+    <button id="send">Accept + Dispatch</button>
+    <button id="steer">Steer last</button>
+    <button id="cancel">Cancel last</button>
+  </div>
+  <textarea id="input" rows="3" placeholder="Message to the agent…"></textarea>
+  <div id="thread" class="thread" aria-live="polite"></div>
+</section>
+
+<section class="approvals">
+  <h2>Approvals (HITL)</h2>
+  <div class="chat-controls">
+    <input id="hitl-id" placeholder="hitl_id">
+    <button id="approve">Approve</button>
+    <button id="reject">Reject</button>
+  </div>
+  <p class="hint">HITL gates arrive as <code>hitl</code> stream events. Approve/reject calls
+    <code>RespondHITL</code>.</p>
+</section>
+
+<section class="connectors">
+  <h2>Connectors / Files / Computer</h2>
+  <p class="hint">Connector catalog, file/artifact download and Computer tools are served by the
+    execution &amp; data contracts, not by Space. They appear here once those APIs are live
+    (tracked as remaining acceptance requirements).</p>
+  <div id="artifacts" class="artifacts"></div>
+</section>
+
+<section class="admin">
+  <h2>Developer / Admin</h2>
+  <div class="chat-controls">
+    <button id="list">ListTurns</button>
+    <button id="getturn">GetTurn</button>
+    <button id="recover">Recover</button>
+    <button id="isoprobe">Two-subject isolation probe</button>
+    <button id="clear">Clear log</button>
+  </div>
+  <pre id="log" class="log"></pre>
+</section>
+
+<script src="/app.js"></script>
+</body>
+</html>

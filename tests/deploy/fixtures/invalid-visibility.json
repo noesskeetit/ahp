@@ -1,0 +1,10 @@
+{
+  "kind": "agent",
+  "system": "bad-viz",
+  "visibility": "public",
+  "audience": "shared",
+  "components": [{"name": "entry", "a2a": true}],
+  "state": {"partition": "subject", "compat": "forward", "drain": "1d"},
+  "capabilities": {"self_tasks": {"max_fanout": 2}},
+  "limits": {"depth": 1, "task_timeout": "1h", "active_tasks": 10}
+}

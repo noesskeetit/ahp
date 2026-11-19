@@ -1,0 +1,14 @@
+{
+  "name": "@ahp-platform/state",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.mts",
+      "import": "./src/index.mjs"
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

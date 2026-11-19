@@ -1,0 +1,68 @@
+// Existing-data browser acceptance. Only auth creates/revokes a browser session;
+// no agent, task, memory, trigger, installation or workspace is created here.
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+const { chromium } = await import(pathToFileURL(process.env.AHP_PLAYWRIGHT_MODULE || '/tmp/h10chain/pw/node_modules/playwright/index.mjs'));
+const origin = process.env.AHP_UI_LIVE_ORIGIN;
+const usersPath = process.env.AHP_UI_LIVE_USERS_JSON;
+if (!origin || !usersPath) throw Error('Set AHP_UI_LIVE_ORIGIN and AHP_UI_LIVE_USERS_JSON');
+const users = JSON.parse(fs.readFileSync(usersPath, 'utf8'));
+const user = users.find(u => u.subject === process.env.AHP_UI_LIVE_SUBJECT);
+if (!user) throw Error('AHP_UI_LIVE_SUBJECT is not in the users document');
+const browser = await chromium.launch({headless:true});
+const context = await browser.newContext({acceptDownloads:true,viewport:{width:1440,height:1000}});
+const page = await context.newPage();
+const errors = [];
+page.on('pageerror', e => errors.push(e.message));
+const permitted = new Set(['login','logout','token','CatalogList','Search','List','ListChats','ListTurns','ReadStream','GetTurn','Resolve','download','Cost']);
+await page.route('**/*', async route => {
+  const path = new URL(route.request().url()).pathname;
+  if ((path.startsWith('/u-ahp/') || path.startsWith('/v1/')) && !permitted.has(path.split('/').at(-1))) throw Error('Read-only browser attempted a mutation');
+  await route.continue();
+});
+try {
+  await page.goto(origin + '/#/memory');
+  await page.locator('[name="ahp-user"]').fill(user.username);
+  await page.locator('[name="ahp-pass"]').fill(user.password);
+  await page.locator('[data-action="ahp-login"]').click();
+  await page.waitForFunction(() => AHP_LIVE.state.S.online && AHP_LIVE.state.L.memoryOutcome?.rows && AHP_LIVE.state.L.triggers && AHP_LIVE.state.L.chats);
+  const counts = await page.evaluate(() => ({memory:AHP_LIVE.state.L.memoryOutcome.rows.length,triggers:AHP_LIVE.state.L.triggers.length,chats:AHP_LIVE.state.L.chats.length,catalog:AHP_LIVE.state.L.catalog?.length}));
+  assert.ok(counts.memory > 0, 'acceptance requires existing nonempty Memory');
+  assert.ok(counts.triggers > 0, 'acceptance requires existing nonempty Crons');
+  await page.goto(origin + '/#/crons');
+  assert.equal(await page.locator('#main tbody tr:not(.no-results)').count(),counts.triggers);
+  await page.reload();
+  await page.waitForFunction(() => AHP_LIVE.state.S.online && AHP_LIVE.state.L.triggers?.length > 0);
+  await page.goto(origin + '/#/chats');
+  await page.locator('[data-action="ahp-chat-open"]').first().click();
+  await page.waitForFunction(() => AHP_LIVE.state.L.artifact?.state === 'resolved');
+  const ref = await page.evaluate(() => ({id:AHP_LIVE.state.L.artifact.artifact_id,version:AHP_LIVE.state.L.artifact.version,digest:AHP_LIVE.state.L.artifact.digest}));
+  const event = page.waitForEvent('download');
+  await page.locator('[data-action="ahp-download"]').click();
+  const downloaded = await event;
+  const bytes = fs.readFileSync(await downloaded.path());
+  const hashMatch = createHash('sha256').update(bytes).digest('hex') === ref.digest;
+  assert.ok(hashMatch);
+  await downloaded.delete();
+  await page.reload();
+  await page.waitForFunction(() => AHP_LIVE.state.L.artifact?.state === 'resolved');
+  assert.equal(await page.evaluate(() => AHP_LIVE.state.L.artifact.artifact_id),ref.id);
+  assert.equal(await page.evaluate(() => AHP_LIVE.state.L.artifact.version),ref.version);
+  await page.setViewportSize({width:390,height:844});
+  await page.goto(origin + '/#/memory');
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth),390);
+  const storage = await page.evaluate(() => ({local:localStorage.length,session:sessionStorage.length}));
+  assert.deepEqual(storage,{local:0,session:0});
+  assert.deepEqual(errors,[]);
+  const plates = await page.evaluate(() => AHP_LIVE.state.L.plates.map(p => ({code:p.code,status:p.status})));
+  assert.deepEqual(plates,[]);
+  await page.locator('[data-action="ahp-logout"]').click();
+  await page.locator('[name="ahp-user"]').waitFor();
+  assert.equal(await page.evaluate(() => AHP_LIVE.state.S.bearer),'');
+  console.log(JSON.stringify({origin,counts,download:{bytes:bytes.length,hashMatch},reload:'exact artifact and version restored',mobileWidth:390,storage,errors,plates,logout:'cleared'},null,2));
+} finally {
+  await context.close();
+  await browser.close();
+}

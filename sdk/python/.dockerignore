@@ -1,0 +1,16 @@
+# What must NOT reach an agent image.
+#
+# The harness (contract doubles, the SIGKILL child, the raw PostgreSQL reader,
+# the divergence probe) speaks on raw sockets, spawns processes and opens the
+# stand's database directly. All of that is legitimate in a source checkout and
+# forbidden inside a container by the same rules `ahp-sdk check` enforces - so it
+# is not shipped, rather than shipped-and-tolerated.
+ahp_state/tests/
+ahp_memory/tests/
+ahp_clients/tests/
+tests/
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+.venv/
+venv/

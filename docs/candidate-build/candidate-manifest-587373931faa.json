@@ -1,0 +1,268 @@
+{
+  "revision": "587373931faab55849a1e40fc483990824d41b67",
+  "built_at_utc": "2026-11-09T15:33:32Z",
+  "go_version": "go1.26.2",
+  "tags": "ahp_data,ahp_exec",
+  "buildinfo_ldflags": true,
+  "host": {
+    "goos": "darwin",
+    "goarch": "arm64"
+  },
+  "images": {
+    "ahp-candidate-ahp:587373931faa": {
+      "config_id": "sha256:82497feabae97335f1bd76e70c1cc3610d9b61b905470e5d04f0667e6f6221b2",
+      "repo_digest": "ahp-candidate-ahp@sha256:82497feabae97335f1bd76e70c1cc3610d9b61b905470e5d04f0667e6f6221b2",
+      "pushed_registry_digest": false,
+      "digest_kind": "local containerd image store digest (NOT pushed to any registry)"
+    },
+    "ahp-candidate-runner:587373931faa": {
+      "config_id": "sha256:03c160ee847578f159cc40db5640c929dc5959e0ced16385fe62fc45bee0b6fa",
+      "repo_digest": "ahp-candidate-runner@sha256:03c160ee847578f159cc40db5640c929dc5959e0ced16385fe62fc45bee0b6fa",
+      "pushed_registry_digest": false,
+      "digest_kind": "local containerd image store digest (NOT pushed to any registry)"
+    }
+  },
+  "provenance_rule": "vcs.revision==revision AND vcs.modified==false",
+  "binaries": {
+    "host/ahp": {
+      "path": "host/ahp",
+      "sha256": "fddff65597639c70cedd775af06307445012f9278862c698ef1961fe4fd3b2e2",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "1",
+        "GOARCH": "arm64",
+        "GOOS": "darwin",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "host/ahp-agent": {
+      "path": "host/ahp-agent",
+      "sha256": "d776c979612b202f3fb50c6c5c15ab835daaa4914d1e9008e0404e38a7b65e48",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "1",
+        "GOARCH": "arm64",
+        "GOOS": "darwin",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "host/ahp-deploy": {
+      "path": "host/ahp-deploy",
+      "sha256": "cf7cb605fd0af4d2ce2523d7be5ca588781048a82577b662a7ae3dffb1df9ffa",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "1",
+        "GOARCH": "arm64",
+        "GOOS": "darwin",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "host/ahp-note-mcp": {
+      "path": "host/ahp-note-mcp",
+      "sha256": "24fc9aa855355a5972128e9e7bcb073eb492de3d774d0c00fa2487d13aa95dca",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "1",
+        "GOARCH": "arm64",
+        "GOOS": "darwin",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "host/artifact-parser": {
+      "path": "host/artifact-parser",
+      "sha256": "72a8c0a3102f81e5f09404887f4fb210b7dbec7da431ce3c6f7e409eaf67260e",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "1",
+        "GOARCH": "arm64",
+        "GOOS": "darwin",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "host/as-runner": {
+      "path": "host/as-runner",
+      "sha256": "647c3f10eeeaf8229db516ca92140a132d665616fc97503e932f716955147bef",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "1",
+        "GOARCH": "arm64",
+        "GOOS": "darwin",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "host/compute-host": {
+      "path": "host/compute-host",
+      "sha256": "cac93b5deb296755e71e2cdd13965f9942187ba57171d540ece3ed2454c475b4",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "1",
+        "GOARCH": "arm64",
+        "GOOS": "darwin",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "host/state-consumer": {
+      "path": "host/state-consumer",
+      "sha256": "707e95a0c4104c08b00a78dff4b6cd8d656a5ec8b64797362ffde96449c09852",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "1",
+        "GOARCH": "arm64",
+        "GOOS": "darwin",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "host/state-stand": {
+      "path": "host/state-stand",
+      "sha256": "0adb8f5b7b50dc9df8999769820500bd40bb75ed0fd54d615ec6815bed4e3edc",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "1",
+        "GOARCH": "arm64",
+        "GOOS": "darwin",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "host/synthetic-authority": {
+      "path": "host/synthetic-authority",
+      "sha256": "278aeb1e2a82eb1d0a783ffce3727111968b6322ab5c869a21e5c62d775c8ef7",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "1",
+        "GOARCH": "arm64",
+        "GOOS": "darwin",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "linux-arm64/ahp": {
+      "path": "linux-arm64/ahp",
+      "sha256": "fc42962b4b17999344aa26025ae5aea72ac3c6cd74be7c3a8634781db61342b2",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "0",
+        "GOARCH": "arm64",
+        "GOOS": "linux",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "linux-arm64/ahp-agent": {
+      "path": "linux-arm64/ahp-agent",
+      "sha256": "0055bd4ec87061c55437c89fe8d7dd9aaed1a2c6b0c3374b9328ba24e2eb0837",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "0",
+        "GOARCH": "arm64",
+        "GOOS": "linux",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "linux-arm64/ahp-deploy": {
+      "path": "linux-arm64/ahp-deploy",
+      "sha256": "4e045d9414794f656004ef68ed10f134fea1038180313d5a267acacae22b8030",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "0",
+        "GOARCH": "arm64",
+        "GOOS": "linux",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "linux-arm64/ahp-note-mcp": {
+      "path": "linux-arm64/ahp-note-mcp",
+      "sha256": "799cca2f15a1643296a20bfa46e03e201e3d9ab5f9149699a3f1732f5b4b0669",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "0",
+        "GOARCH": "arm64",
+        "GOOS": "linux",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "linux-arm64/artifact-parser": {
+      "path": "linux-arm64/artifact-parser",
+      "sha256": "28210907704fd2617990d303ba5cd6329c93fe7b25b16dd9fa957b34a4a2d93d",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "0",
+        "GOARCH": "arm64",
+        "GOOS": "linux",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "linux-arm64/as-runner": {
+      "path": "linux-arm64/as-runner",
+      "sha256": "94f360cc0931c650311ac5988d6405c9a06e50cc205505c7e7ed74a26826b2c1",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "0",
+        "GOARCH": "arm64",
+        "GOOS": "linux",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "linux-arm64/compute-host": {
+      "path": "linux-arm64/compute-host",
+      "sha256": "3394fae8b87fda96fc126eb0cb814b6300e86fcd78eb27839a143dcb3a2334fd",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "0",
+        "GOARCH": "arm64",
+        "GOOS": "linux",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "linux-arm64/state-consumer": {
+      "path": "linux-arm64/state-consumer",
+      "sha256": "91d4e9ba6c003deb31473fdb24b9ef4e1ae78521854d4821f8d90d047ca70b8d",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "0",
+        "GOARCH": "arm64",
+        "GOOS": "linux",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "linux-arm64/state-stand": {
+      "path": "linux-arm64/state-stand",
+      "sha256": "02c73f396dfe5b4c2f5580b2f913549d4fe2b0c2a7982d872b9a3b77b8cc7caf",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "0",
+        "GOARCH": "arm64",
+        "GOOS": "linux",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    },
+    "linux-arm64/synthetic-authority": {
+      "path": "linux-arm64/synthetic-authority",
+      "sha256": "211778cc4a0e38fee384fea68aaf11b20aa37e52554652544d72dafdadd6e775",
+      "provenance": {
+        "-tags": "ahp_data,ahp_exec",
+        "CGO_ENABLED": "0",
+        "GOARCH": "arm64",
+        "GOOS": "linux",
+        "vcs.revision": "587373931faab55849a1e40fc483990824d41b67",
+        "vcs.modified": "false"
+      }
+    }
+  }
+}

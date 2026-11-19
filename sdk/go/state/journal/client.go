@@ -1,0 +1,284 @@
+// Package journal is the Go client for the compact AHP State API.
+package journal
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/url"
+	"strconv"
+	"time"
+
+	"github.com/ahp-platform/ahp/pkg/contracts"
+	"github.com/ahp-platform/ahp/sdk/go/internal/clienthttp"
+)
+
+const sessions = "/v1/state/sessions"
+
+type Config struct {
+	BaseURL     string
+	HTTPClient  *http.Client
+	TokenSource func(context.Context) (string, error)
+}
+
+// Client obtains the current task token for every call. It never retries a
+// mutating request. After a transport failure, reconcile the same stable
+// operation key before starting another action.
+type Client struct {
+	http *clienthttp.Client
+}
+
+func New(config Config) (*Client, error) {
+	transport, err := clienthttp.New(clienthttp.Config{
+		BaseURL: config.BaseURL, HTTPClient: config.HTTPClient, TokenSource: config.TokenSource,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Client{http: transport}, nil
+}
+
+type SessionLease struct {
+	Lease
+	ResumeState
+	ToolLeaseProof string `json:"tool_lease_proof,omitempty"`
+}
+
+type ClaimedTurn struct {
+	TurnLease
+	ToolLeaseProof string `json:"tool_lease_proof,omitempty"`
+}
+
+func (c *Client) AcquireSession(ctx context.Context, session, harness string, version int, ttl time.Duration) (SessionLease, error) {
+	var lease SessionLease
+	request := struct {
+		Session string `json:"session_id"`
+		Harness string `json:"harness_type"`
+		Version int    `json:"format_version"`
+		TTL     int64  `json:"ttl_ms"`
+	}{session, harness, version, ttl.Milliseconds()}
+	err := c.http.Call(ctx, sessions+":acquire", request, &lease, true)
+	return lease, err
+}
+
+func (c *Client) HeartbeatLease(ctx context.Context, session string, epoch int64, ttl time.Duration) (SessionLease, error) {
+	var lease SessionLease
+	err := c.http.Call(ctx, sessionPath(session)+":heartbeat", leaseChange{Epoch: epoch, TTL: ttl.Milliseconds()}, &lease, true)
+	return lease, err
+}
+
+func (c *Client) ReleaseLease(ctx context.Context, session string, epoch int64) error {
+	return c.http.Call(ctx, sessionPath(session)+":heartbeat", leaseChange{Epoch: epoch, Release: true}, nil, true)
+}
+
+type leaseChange struct {
+	Epoch   int64 `json:"lease_epoch"`
+	TTL     int64 `json:"ttl_ms,omitempty"`
+	Release bool  `json:"release,omitempty"`
+}
+
+func (c *Client) EnqueueTurn(ctx context.Context, input EnqueueRequest) (EnqueueReceipt, error) {
+	var receipt EnqueueReceipt
+	err := c.http.Call(ctx, sessions+":enqueue", input, &receipt, true)
+	return receipt, err
+}
+
+func (c *Client) ClaimTurn(ctx context.Context, session string, ttl time.Duration) (ClaimedTurn, error) {
+	var turn ClaimedTurn
+	req := struct {
+		Session string `json:"session_id,omitempty"`
+		TTL     int64  `json:"ttl_ms"`
+	}{session, ttl.Milliseconds()}
+	err := c.http.Call(ctx, sessions+":claim-turn", req, &turn, true)
+	return turn, err
+}
+
+func (c *Client) GetTurnStatus(ctx context.Context, session string) (TurnStatus, error) {
+	var result TurnStatus
+	err := c.get(ctx, sessionPath(session), nil, &result)
+	return result, err
+}
+
+func (c *Client) InspectSession(ctx context.Context, session string) (ResumeState, error) {
+	var result ResumeState
+	err := c.get(ctx, sessionPath(session), url.Values{"view": {"resume"}}, &result)
+	return result, err
+}
+
+func (c *Client) ListSessions(ctx context.Context, harness, cursor string, limit int) (SessionPage, error) {
+	var result SessionPage
+	query := url.Values{"harness": {harness}, "cursor": {cursor}, "limit": {strconv.Itoa(limit)}}
+	err := c.get(ctx, sessions, query, &result)
+	return result, err
+}
+
+func (c *Client) DeleteSession(ctx context.Context, session string) error {
+	return c.http.CallMethod(ctx, http.MethodDelete, sessionPath(session), nil, nil, true)
+}
+
+func (c *Client) SetLegalHold(ctx context.Context, session string, held bool) error {
+	req := struct {
+		Held bool `json:"held"`
+	}{held}
+	return c.http.CallMethod(ctx, http.MethodPatch, sessionPath(session)+"/legal-hold", req, nil, true)
+}
+
+func (c *Client) AppendEvents(ctx context.Context, session string, epoch int64, appendRequest AppendRequest) (AppendReceipt, error) {
+	var receipt AppendReceipt
+	input := struct {
+		Epoch int64 `json:"lease_epoch"`
+		AppendRequest
+	}{epoch, appendRequest}
+	err := c.http.Call(ctx, sessionPath(session)+"/events:append", input, &receipt, true)
+	return receipt, err
+}
+
+func (c *Client) GetEvents(ctx context.Context, session string, afterSeq int64, limit int, stateNamespace string) (EventPage, error) {
+	var result EventPage
+	query := url.Values{"after_seq": {strconv.FormatInt(afterSeq, 10)}, "limit": {strconv.Itoa(limit)}}
+	if stateNamespace != "" {
+		query.Set("state_namespace", stateNamespace)
+	}
+	err := c.get(ctx, sessionPath(session)+"/events", query, &result)
+	return result, err
+}
+
+func (c *Client) PutCheckpoint(ctx context.Context, session string, epoch int64, checkpoint CheckpointCommit) (string, error) {
+	var result struct {
+		ID string `json:"checkpoint_id"`
+	}
+	request := struct {
+		Epoch int64 `json:"lease_epoch"`
+		CheckpointCommit
+	}{epoch, checkpoint}
+	err := c.http.Call(ctx, sessionPath(session)+"/checkpoints", request, &result, true)
+	if err == nil && result.ID == "" {
+		err = contracts.NewError(contracts.ErrInvalid, "missing checkpoint receipt ID")
+	}
+	return result.ID, err
+}
+
+func (c *Client) GetCheckpoint(ctx context.Context, session, namespace, id string) (CheckpointTuple, error) {
+	var result CheckpointTuple
+	query := url.Values{"checkpoint_ns": {namespace}, "checkpoint_id": {id}}
+	err := c.get(ctx, sessionPath(session)+"/checkpoints", query, &result)
+	return result, err
+}
+
+func (c *Client) ListCheckpoints(ctx context.Context, session, namespace, before string, limit int) ([]string, error) {
+	var result struct {
+		IDs []string `json:"checkpoint_ids"`
+	}
+	query := url.Values{"list": {"true"}, "checkpoint_ns": {namespace}, "before": {before}, "limit": {strconv.Itoa(limit)}}
+	err := c.get(ctx, sessionPath(session)+"/checkpoints", query, &result)
+	return result.IDs, err
+}
+
+func (c *Client) PutWrites(ctx context.Context, session, namespace, checkpoint string, epoch int64, writes []PendingWrite) error {
+	request := struct {
+		Epoch     int64          `json:"lease_epoch"`
+		Namespace string         `json:"namespace"`
+		Writes    []PendingWrite `json:"writes"`
+	}{epoch, namespace, writes}
+	return c.http.Call(ctx, sessionPath(session)+"/checkpoints/"+url.PathEscape(checkpoint)+"/writes", request, nil, true)
+}
+
+func (c *Client) GetToolIntent(ctx context.Context, session, callID string) (ToolIntent, error) {
+	var result ToolIntent
+	query := url.Values{"session_id": {session}, "call_id": {callID}}
+	err := c.get(ctx, "/v1/state/aux:mutate", query, &result)
+	return result, err
+}
+
+func (c *Client) MutateToolIntent(ctx context.Context, session string, epoch int64, transition IntentTransition) error {
+	request := struct {
+		Session    string           `json:"session_id"`
+		Epoch      int64            `json:"lease_epoch"`
+		Transition IntentTransition `json:"transition"`
+	}{session, epoch, transition}
+	return c.http.Call(ctx, "/v1/state/aux:mutate", request, nil, true)
+}
+
+func (c *Client) GetSharedState(ctx context.Context, namespace string) ([]KVEntry, error) {
+	var result []KVEntry
+	err := c.get(ctx, "/v1/state/aux:mutate", url.Values{"state_namespace": {namespace}}, &result)
+	return result, err
+}
+
+func (c *Client) GetKV(ctx context.Context, session, scopeType, namespace, key string, limit int) ([]KVEntry, error) {
+	var result []KVEntry
+	query := url.Values{"session_id": {session}, "scope_type": {scopeType},
+		"namespace": {namespace}, "key": {key}, "limit": {strconv.Itoa(limit)}}
+	err := c.get(ctx, "/v1/state/kv", query, &result)
+	return result, err
+}
+
+func (c *Client) MutateKV(ctx context.Context, session string, epoch, expectedSeq int64, key string, changes []KVMutation) (AppendReceipt, error) {
+	var result AppendReceipt
+	request := struct {
+		Session string       `json:"session_id"`
+		Epoch   int64        `json:"lease_epoch"`
+		Seq     int64        `json:"expected_seq"`
+		Key     string       `json:"key"`
+		KV      []KVMutation `json:"kv"`
+	}{session, epoch, expectedSeq, key, changes}
+	err := c.http.Call(ctx, "/v1/state/kv:mutate", request, &result, true)
+	return result, err
+}
+
+func (c *Client) GetChatHistory(ctx context.Context, session, namespace, checkpoint string) (ChatHistory, error) {
+	var result ChatHistory
+	query := url.Values{"checkpoint_ns": {namespace}, "checkpoint_id": {checkpoint}}
+	err := c.get(ctx, sessionPath(session)+"/chat-history", query, &result)
+	return result, err
+}
+
+// StageBlob uploads a large value. Publish the returned reference in a
+// checkpoint, event or session KV update to retain it past staging.
+func (c *Client) StageBlob(ctx context.Context, session string, epoch int64, data []byte) (BlobRef, error) {
+	var ref BlobRef
+	input := struct {
+		Epoch int64  `json:"lease_epoch"`
+		Data  []byte `json:"data"`
+	}{epoch, data}
+	err := c.http.Call(ctx, sessionPath(session)+"/blobs:stage", input, &ref, true)
+	return ref, err
+}
+
+func (c *Client) ReadBlob(ctx context.Context, session string, ref BlobRef) ([]byte, error) {
+	var result struct {
+		Data []byte `json:"data"`
+	}
+	err := c.http.Call(ctx, sessionPath(session)+"/blobs:read", ref, &result, false)
+	return result.Data, err
+}
+
+func (c *Client) get(ctx context.Context, path string, query url.Values, out any) error {
+	if len(query) > 0 {
+		path += "?" + query.Encode()
+	}
+	return c.http.CallMethod(ctx, http.MethodGet, path, nil, out, false)
+}
+
+func sessionPath(session string) string {
+	return sessions + "/" + url.PathEscape(session)
+}
+
+// BeginStandaloneTool returns a one-time dispatch decision for a prepared
+// tool. An unknown transport outcome is never permission to execute.
+func (c *Client) BeginStandaloneTool(ctx context.Context, session string, epoch int64, tool StandaloneToolRequest) (StandaloneToolDecision, error) {
+	var result StandaloneToolDecision
+	request := struct {
+		Epoch int64 `json:"lease_epoch"`
+		StandaloneToolRequest
+	}{epoch, tool}
+	path := sessionPath(session) + "/tools:begin-standalone"
+	err := c.http.Call(ctx, path, request, &result, true)
+	var transportFailure *clienthttp.Error
+	if !tool.AckLost && errors.As(err, &transportFailure) && transportFailure.OutcomeUnknown && ctx.Err() == nil {
+		request.AckLost = true
+		result = StandaloneToolDecision{}
+		err = c.http.Call(ctx, path, request, &result, true)
+	}
+	return result, err
+}

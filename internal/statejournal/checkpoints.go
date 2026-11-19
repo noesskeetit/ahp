@@ -1,0 +1,335 @@
+package statejournal
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+
+	"github.com/ahp-platform/ahp/pkg/contracts"
+	"github.com/ahp-platform/ahp/pkg/contracts/journal"
+	"github.com/jackc/pgx/v5"
+)
+
+const langGraphCodec = "langgraph-jsonplus-v1"
+
+type PendingWrite = journal.PendingWrite
+
+type Checkpoint = journal.Checkpoint
+
+type CheckpointCommit = journal.CheckpointCommit
+
+type CheckpointTuple = journal.CheckpointTuple
+
+func (s *Store) PutCheckpoint(ctx context.Context, scope contracts.Scope, session string, lease Lease, req CheckpointCommit) (string, error) {
+	cp := req.Checkpoint
+	if err := scope.Validate(); err != nil {
+		return "", err
+	}
+	if !validID(req.Key) || !validCheckpointKey(cp.Namespace, cp.ID) || !validID(cp.Codec) ||
+		(cp.ParentID != "" && (!validID(cp.ParentID) || cp.ParentID == cp.ID)) ||
+		cp.SnapshotSeq < 0 || !json.Valid(cp.Metadata) || !json.Valid(cp.ChannelVersions) ||
+		!validPayload(cp.Payload) || cp.ChatEventID != "" {
+		return "", contracts.NewError(contracts.ErrInvalid, "invalid checkpoint commit")
+	}
+	if err := validateWrites(req.Writes); err != nil {
+		return "", err
+	}
+	if err := validateIntents(req.Intents); err != nil {
+		return "", err
+	}
+	if err := validateOutcomes(req.ToolOutcomes); err != nil {
+		return "", err
+	}
+	inline := len(cp.Payload.Inline) + inlineWritesSize(req.Writes)
+	for _, outcome := range req.ToolOutcomes {
+		if outcome.Result != nil {
+			inline += len(outcome.Result.Inline)
+		}
+	}
+	if inline > 2<<20 {
+		return "", contracts.NewError(contracts.ErrInvalid, "checkpoint exceeds 2 MiB of inline payload")
+	}
+	chat, err := encodeChatDelta(cp.Codec, req.Chat)
+	if err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(req)
+	if err != nil {
+		return "", err
+	}
+	legacyDigest := sha256.Sum256(encoded)
+	// PostgreSQL compares the two JSONB fields directly on replay. Hash the
+	// remaining, typed fields so the comparison preserves JSONB's number range
+	// and still detects changes to opaque bytes, writes and tool intents.
+	replayRequest := req
+	replayRequest.Checkpoint.Metadata = nil
+	replayRequest.Checkpoint.ChannelVersions = nil
+	replayBody, err := json.Marshal(replayRequest)
+	if err != nil {
+		return "", err
+	}
+	canonicalDigest := sha256.Sum256(replayBody)
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	head, err := lockSession(ctx, tx, scope, session, lease)
+	if err != nil {
+		return "", err
+	}
+	if cp.SnapshotSeq > head {
+		return "", contracts.NewError(contracts.ErrConflict, "checkpoint references uncommitted journal events")
+	}
+	var id string
+	var chatID string
+	if len(chat) != 0 {
+		chatID = chatEventID(cp.Namespace, cp.ID)
+	}
+	err = tx.QueryRow(ctx, `
+		INSERT INTO ahp_journal.checkpoints
+			(tenant_id, session_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+			 snapshot_seq, metadata, channel_versions, codec, inline_payload, blob_ref, operation_key,
+			 request_digest, canonical_request_digest, chat_event_id)
+		SELECT $1,$2,$3,$4,nullif($5,''),$6,$7,$8,$9,$10,$11,$12,$13,$14,nullif($15,'')
+		WHERE $5='' OR EXISTS (
+			SELECT 1 FROM ahp_journal.checkpoints
+			WHERE tenant_id=$1 AND session_id=$2 AND checkpoint_ns=$3 AND checkpoint_id=$5)
+		ON CONFLICT (tenant_id, session_id, operation_key) DO NOTHING RETURNING checkpoint_id`,
+		scope.Tenant, session, cp.Namespace, cp.ID, cp.ParentID, cp.SnapshotSeq,
+		cp.Metadata, cp.ChannelVersions, cp.Codec, cp.Payload.Inline, blobValue(cp.Payload),
+		req.Key, legacyDigest[:], canonicalDigest[:], chatID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var priorLegacy, priorCanonical []byte
+		var sameJSON bool
+		err = tx.QueryRow(ctx, `
+			SELECT checkpoint_id, request_digest, canonical_request_digest,
+			       metadata=$4::jsonb AND channel_versions=$5::jsonb
+			FROM ahp_journal.checkpoints
+			WHERE tenant_id=$1 AND session_id=$2 AND operation_key=$3`,
+			scope.Tenant, session, req.Key, cp.Metadata, cp.ChannelVersions).
+			Scan(&id, &priorLegacy, &priorCanonical, &sameJSON)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", contracts.NewError(contracts.ErrInvalid, "checkpoint parent must exist in the same session and namespace")
+		}
+		if err != nil {
+			return "", err
+		}
+		if sameJSON && bytes.Equal(priorCanonical, canonicalDigest[:]) {
+			return id, nil
+		}
+		if priorCanonical != nil || !bytes.Equal(priorLegacy, legacyDigest[:]) {
+			return "", contracts.NewError(contracts.ErrKeyReuse, "checkpoint key has a different request digest")
+		}
+		// An exact replay supplies the original request for a pre-upgrade
+		// checkpoint. Add its canonical digest without changing the old one.
+		if _, err := tx.Exec(ctx, `
+			UPDATE ahp_journal.checkpoints SET canonical_request_digest=$4
+			WHERE tenant_id=$1 AND session_id=$2 AND operation_key=$3`,
+			scope.Tenant, session, req.Key, canonicalDigest[:]); err != nil {
+			return "", err
+		}
+		return id, tx.Commit(ctx)
+	}
+	if err != nil {
+		return "", classifyWrite(err)
+	}
+	refs := addOutcomeBlobs(addWriteBlobs(addBlob(nil, cp.Payload), req.Writes), req.ToolOutcomes)
+	if err := s.pinBlobs(ctx, tx, scope, session, refs); err != nil {
+		return "", err
+	}
+	if err := putWrites(ctx, tx, scope.Tenant, session, cp.Namespace, cp.ID, req.Writes); err != nil {
+		return "", err
+	}
+	if err := prepareIntents(ctx, tx, scope.Tenant, session, lease.Epoch, req.Intents); err != nil {
+		return "", err
+	}
+	if err := commitOutcomes(ctx, tx, scope.Tenant, session, req.ToolOutcomes); err != nil {
+		return "", err
+	}
+	if chatID != "" {
+		if err := appendChatDelta(ctx, tx, scope, session, cp, head, chatID, chat); err != nil {
+			return "", err
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE ahp_journal.sessions SET head_checkpoint_id=$3, updated_at=clock_timestamp()
+		WHERE tenant_id=$1 AND session_id=$2`, scope.Tenant, session, id); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func (s *Store) PutWrites(ctx context.Context, scope contracts.Scope, session string, lease Lease, namespace, checkpointID string, writes []PendingWrite) error {
+	if err := scope.Validate(); err != nil {
+		return err
+	}
+	if !validCheckpointKey(namespace, checkpointID) {
+		return contracts.NewError(contracts.ErrInvalid, "invalid checkpoint key")
+	}
+	if err := validateWrites(writes); err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := lockSession(ctx, tx, scope, session, lease); err != nil {
+		return err
+	}
+	if err := s.pinBlobs(ctx, tx, scope, session, addWriteBlobs(nil, writes)); err != nil {
+		return err
+	}
+	if err := putWrites(ctx, tx, scope.Tenant, session, namespace, checkpointID, writes); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func putWrites(ctx context.Context, tx pgx.Tx, tenant, session, namespace, checkpointID string, writes []PendingWrite) error {
+	for _, write := range writes {
+		args := []any{tenant, session, namespace, checkpointID, write.TaskID, write.Index,
+			write.TaskPath, write.Channel, write.Codec, write.Payload.Inline, blobValue(write.Payload)}
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO ahp_journal.checkpoint_writes
+				(tenant_id,session_id,checkpoint_ns,checkpoint_id,task_id,idx,task_path,
+				 channel,codec,inline_payload,blob_ref)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`, args...)
+		if err != nil {
+			return classifyWrite(err)
+		}
+		if tag.RowsAffected() != 0 {
+			continue
+		}
+		// LangGraph derives the same nonnegative write slot when it forks from
+		// a historical checkpoint. Its saver keeps the first slot value. The
+		// alternate update is materialized in a distinct child checkpoint.
+		var match bool
+		err = tx.QueryRow(ctx, `
+			SELECT task_path=$7 AND channel=$8 AND codec=$9 AND (
+			  (idx>=0 AND codec=$12)
+			  OR (inline_payload IS NOT DISTINCT FROM $10::bytea
+			      AND blob_ref IS NOT DISTINCT FROM $11::jsonb))
+			FROM ahp_journal.checkpoint_writes
+			WHERE tenant_id=$1 AND session_id=$2 AND checkpoint_ns=$3 AND checkpoint_id=$4
+			  AND task_id=$5 AND idx=$6`, append(args, langGraphCodec)...).Scan(&match)
+		if err != nil {
+			return err
+		}
+		if !match {
+			return contracts.NewError(contracts.ErrKeyReuse, "pending write key has different data")
+		}
+	}
+	return nil
+}
+
+func (s *Store) GetCheckpoint(ctx context.Context, scope contracts.Scope, session, namespace, checkpointID string) (CheckpointTuple, error) {
+	if err := scope.Validate(); err != nil {
+		return CheckpointTuple{}, err
+	}
+	if (namespace != "" && !validID(namespace)) || (checkpointID != "" && !validID(checkpointID)) {
+		return CheckpointTuple{}, contracts.NewError(contracts.ErrInvalid, "invalid checkpoint key")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return CheckpointTuple{}, err
+	}
+	defer tx.Rollback(ctx)
+	var result CheckpointTuple
+	cp := &result.Checkpoint
+	cp.Namespace = namespace
+	// If the ID is omitted, use the newest native sortable identifier in this namespace.
+	args := []any{scope.Tenant, session, scope.Deployment, scope.Subject, namespace}
+	filter := "ORDER BY c.checkpoint_id DESC LIMIT 1"
+	if checkpointID != "" {
+		filter = "AND c.checkpoint_id=$6"
+		args = append(args, checkpointID)
+	}
+	err = tx.QueryRow(ctx, `
+		SELECT c.checkpoint_id, coalesce(c.parent_checkpoint_id,''), c.snapshot_seq, c.metadata,
+		       c.channel_versions, c.codec, c.inline_payload, c.blob_ref, COALESCE(c.chat_event_id,'')
+		FROM ahp_journal.checkpoints c JOIN ahp_journal.sessions t USING (tenant_id, session_id)
+		WHERE c.tenant_id=$1 AND c.session_id=$2 AND t.deployment_id=$3 AND t.subject_id=$4
+		  AND c.checkpoint_ns=$5 AND t.status <> 'DELETED' `+filter, args...).
+		Scan(&cp.ID, &cp.ParentID, &cp.SnapshotSeq, &cp.Metadata, &cp.ChannelVersions, &cp.Codec, &cp.Payload.Inline, &cp.Payload.Blob, &cp.ChatEventID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = contracts.NewError(contracts.ErrNotFound, "checkpoint not found")
+	}
+	if err != nil {
+		return CheckpointTuple{}, err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT task_id, task_path, idx, channel, codec, inline_payload, blob_ref
+		FROM ahp_journal.checkpoint_writes
+		WHERE tenant_id=$1 AND session_id=$2 AND checkpoint_ns=$3 AND checkpoint_id=$4
+		ORDER BY task_id, idx`, scope.Tenant, session, namespace, cp.ID)
+	if err != nil {
+		return CheckpointTuple{}, err
+	}
+	result.Writes, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (PendingWrite, error) {
+		var write PendingWrite
+		err := row.Scan(&write.TaskID, &write.TaskPath, &write.Index, &write.Channel, &write.Codec,
+			&write.Payload.Inline, &write.Payload.Blob)
+		return write, err
+	})
+	if err != nil {
+		return CheckpointTuple{}, err
+	}
+	return result, tx.Commit(ctx)
+}
+
+func (s *Store) ListCheckpointIDs(ctx context.Context, scope contracts.Scope, session, namespace, before string, limit int) ([]string, error) {
+	if err := scope.Validate(); err != nil {
+		return nil, err
+	}
+	if !validID(session) || (namespace != "" && !validID(namespace)) ||
+		(before != "" && !validID(before)) || limit < 1 || limit > 1000 {
+		return nil, contracts.NewError(contracts.ErrInvalid, "invalid checkpoint page")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT c.checkpoint_id
+		FROM ahp_journal.checkpoints c JOIN ahp_journal.sessions t USING (tenant_id, session_id)
+		WHERE c.tenant_id=$1 AND c.session_id=$2 AND t.deployment_id=$3 AND t.subject_id=$4
+		  AND c.checkpoint_ns=$5 AND t.status <> 'DELETED' AND ($6='' OR c.checkpoint_id<$6)
+		ORDER BY c.checkpoint_id DESC LIMIT $7`,
+		scope.Tenant, session, scope.Deployment, scope.Subject, namespace, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
+func validCheckpointKey(namespace, checkpointID string) bool {
+	return validID(checkpointID) && (namespace == "" || validID(namespace))
+}
+
+func validateWrites(writes []PendingWrite) error {
+	if len(writes) > 256 {
+		return contracts.NewError(contracts.ErrInvalid, "pending write batch exceeds 256 items")
+	}
+	if inlineWritesSize(writes) > 2<<20 {
+		return contracts.NewError(contracts.ErrInvalid, "pending writes exceed 2 MiB of inline payload")
+	}
+	for _, write := range writes {
+		if !validID(write.TaskID) || !validID(write.Channel) || !validID(write.Codec) ||
+			len(write.TaskPath) > 1024 || !validPayload(write.Payload) {
+			return contracts.NewError(contracts.ErrInvalid, "invalid pending write")
+		}
+	}
+	return nil
+}
+
+func inlineWritesSize(writes []PendingWrite) int {
+	var size int
+	for _, write := range writes {
+		size += len(write.Payload.Inline)
+	}
+	return size
+}

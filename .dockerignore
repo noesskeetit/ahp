@@ -1,0 +1,41 @@
+# Docker build-context hygiene (DEF-LANE-TRACKED-BINARY).
+#
+# Why this file exists: infra/Dockerfile.ahp is built with `context: .` and
+# `COPY . .` (compose.yaml:99-101). Until 2026-11-10 the repository root also
+# carried a TRACKED 28 MB ELF named `ahp`, so that build shipped a compiled binary
+# of unknown provenance into its own context, and whichever `go build ./cmd/<name>`
+# a lane happened to run last silently decided what the image contained.
+#
+# The patterns below exclude compiled outputs and local scratch from any
+# repository-root build context. They never exclude a build input: go.mod, go.sum,
+# cmd/, internal/, pkg/, infra/ and web/ (web/ is //go:embed'ed) all stay in, so
+# the compile still has everything it needs.
+#
+# The mirrored .gitignore rules keep the same files out of `git status`; a leg in
+# tests/hygiene/tracked_artifacts_test.go keeps the two lists from drifting.
+
+# Root-level outputs of `go build ./cmd/<name>` with no -o.
+/ahp
+/ahp-agent
+/ahp-deploy
+/ahp-note-mcp
+/artifact-parser
+/as-runner
+/compute-host
+/state-consumer
+/state-stand
+/synthetic-authority
+
+# Sanctioned build outputs and their provenance manifests: an image must be built
+# from source or from an explicitly COPYed binary (scripts/build-candidate.sh),
+# never from a whole output directory that happens to be lying around.
+/bin/
+/build-out/
+
+# Local scratch that is never a build input.
+/.git/
+/.gocache/
+/.ahp-evidence/
+/coverage/
+/infra/certs/
+/node_modules/

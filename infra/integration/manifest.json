@@ -1,0 +1,211 @@
+{
+  "schema": "ahp.integrated-snapshot/1",
+  "purpose": "Immutable integrated snapshot manifest for the independent integration-accepter. Records the exact baseline plus accepted owner-block commits integrated into the delivery worktree, the byte-identity proof, and the single requirements source. Source == deployment is NOT claimed by this manifest.",
+  "generated_at_utc": "2026-10-29T15:40:00Z",
+  "generated_by": "delivery-contractor (hive-runtime)",
+  "baseline": {
+    "commit": "8b14a59662f6652d3f385db140a3c60fc82e698b",
+    "tree": "9e18bc6aa33d4405737ba53ae072c76910c6514f",
+    "repo": "go-platform",
+    "note": "All owner blocks are linear children of this baseline (parent == baseline)."
+  },
+  "requirements_source": {
+    "path": "/Users/aogabbasov/Downloads/ahp-agents-space-architecture (2) (1).pdf",
+    "sha256": "044e045b73b7c34b642bd3c9eb5701b93eed470873a1e0a44e8b1d024821a7e2",
+    "revision": "3.2",
+    "pages": 64,
+    "mode": "exclusive-user-pdf",
+    "note": "Sole product/acceptance requirements source. Internal links do NOT expand scope. Read via pdftotext outside the repo; PDF is not committed."
+  },
+  "integrated_owner_blocks": [
+    {
+      "block": "identity",
+      "commit": "a65ebc17d56f41822d12a7ac4d102aa40fb7a492",
+      "tree": "396d07d40d2dfffc1fe5b4952d643792ee6e6d28",
+      "parent": "8b14a59662f6652d3f385db140a3c60fc82e698b",
+      "owner_files": 11,
+      "bundle_path": "company-brain/acceptance/identity/identity-a65ebc1.bundle",
+      "bundle_sha256": "7f91d5c02b62b33ce1f5f49c2436d70b1e5bd405a6397682470fc4c77a16a0d4",
+      "status_as_reported": "accepted"
+    },
+    {
+      "block": "state",
+      "commit": "461aa2ced68995b4c4cce69953227c78e0c059ba",
+      "tree": "ab26b506f1f246f8c48fe61378bfc4896cc1dc83",
+      "parent": "8b14a59662f6652d3f385db140a3c60fc82e698b",
+      "owner_files": 35,
+      "bundle_path": "/tmp/state-block.bundle (EPHEMERAL; no canonical copy under acceptance/state/)",
+      "bundle_sha256": "f89ab6c92aa9756159478f2911198e8761666b5f4a59707e8a93170c72a270c6",
+      "status_as_reported": "accepted",
+      "caveat": "No canonical bundle under acceptance/state/ was provided by the owner; provenance copy preserved under acceptance/integration/delivery/. The earlier space<->state wire incompatibility (SDK AppendStream/PutCheckpoint -> HTTP 400) was reproduced against the REJECTED space rev 6edf20b; it is resolved by space rev cfc4357 (wire fix) and is NOT present in this integrated tree: `go test -tags state_integration ./tests/space/...` is 32/32 green against State 461aa2ce on the isolated DB."
+    },
+    {
+      "block": "compute",
+      "commit": "27cd43821995570e9c23964ae60a282026b3fccd",
+      "tree": "c8a0a1bed623d10304078e501e487bf63f10dbf0",
+      "parent": "8b14a59662f6652d3f385db140a3c60fc82e698b",
+      "owner_files": 45,
+      "bundle_path": "company-brain/acceptance/compute/compute-27cd43821995570e9c23964ae60a282026b3fccd.bundle",
+      "bundle_sha256": "d2cc73b1a925db641a3e084c7bf9542c3c564b93eba58316fa728bd3762254a2",
+      "status_as_reported": "accepted"
+    },
+    {
+      "block": "space",
+      "commit": "cfc4357e8d64b457ee73238b4ebaa25ef9770c34",
+      "tree": "3396773bad74819d0187b9a9af7ca27cdab363a9",
+      "parent": "6edf20b50d2d7d6e05f4320c6031d8a5e1b2e669",
+      "owner_files": 35,
+      "bundle_path": "company-brain/runs/space-product-1793266209688-212/space-product-cfc4357.bundle",
+      "bundle_sha256": "d398a86bfa5bba59b6eb179d15459e6bb45039f2477d4abb434aa1f91b26bf61",
+      "status_as_reported": "changes_required (NOT accepted)",
+      "imported_byte_identical": true,
+      "note": "Space owner code imported UNMODIFIED into the delivery tree (35 files byte-identical to cfc4357; no shared-file edits; go.mod untouched). Integration chain: cfc4357 -> 6edf20b -> 674d388 -> 8b14a59. Director verdict 20261029T151940Z records this block as changes_required (no independent green-run, PDF Space-UI remainder). State<->Space wire is green in THIS integrated tree (32/32 via npm run test:space-state), addressing the prior 'Space absent' blocker; whole-system acceptance remains OPEN pending director acceptance of this block."
+    }
+  ],
+  "byte_identity_proof": {
+    "method": "Per-owner file diff vs baseline; each owner blob OID (git rev-parse <owner>:<file>) compared against git hash-object of the file in the delivery worktree, in a scratch repo with bundles fetched against baseline prerequisite.",
+    "verified_at_utc": "2026-10-29T15:40:00Z",
+    "total_owner_files": 126,
+    "byte_identical": 122,
+    "different": 4,
+    "missing_in_worktree": 0,
+    "different_files": [
+      ".gitignore",
+      "go.mod"
+    ],
+    "different_explanation": "The only differing paths are the two shared integration files (.gitignore, go.mod), each appearing in two owner bundles (identity+state), hence 4 entries. In the worktree these are RFC-merged supersets (delivery owns go.mod/go.sum per contract; merges published to forum), never owner-file edits. The 35 imported space (cfc4357) files touch none of these shared files and are all byte-identical."
+  },
+  "ownership": {
+    "delivery_owns": [
+      "cmd/ahp",
+      "cmd/ahp-deploy",
+      "infra",
+      "scripts",
+      "compose.yaml",
+      "go.mod",
+      "go.sum",
+      "package.json",
+      "tests/e2e",
+      "tests/chaos",
+      "tests/load",
+      "docs/coverage.md",
+      "docs/progress.md",
+      "README.md",
+      "pkg/otel"
+    ],
+    "ownership_excludes": [
+      "infra/compute"
+    ],
+    "import_policy": "Immutable producer snapshots imported into delivery worktree after manifest/hash/owner verification; no independent edits to imported owner code; provenance retained."
+  },
+  "test_entrypoints": {
+    "isolated_db": "ahp_hive_delivery (launcher-provisioned via env; allowlist ahp_hive_[a-z][a-z0-9_]{0,23}); every DB-facing child routed here, never the shared ahp_go DB",
+    "build": "source the delivery GO env (GOMODCACHE offline, GOPROXY=off); go build ./... ; then produce product binaries with scripts/build-product.sh ahp as-runner (writes into the ignored bin/, uses the canonical -tags=ahp_exec,ahp_data with CGO_ENABLED=0 -trimpath, and REFUSES to publish unless go version -m reports vcs.revision == HEAD and vcs.modified == false; a bare `go build ./cmd/ahp` drops ./ahp in the repository root and an untagged build is a different program)",
+    "whole_system": "npm run test:whole-system  (== node scripts/run-tests.mjs e2e whole-system == node tests/e2e/whole-system.mjs): boots state role + as-runner in one group, asserts readiness, Space->live-State wiring, POST /v1/space/ListTurns=200 routing, per-role OTel span; 6/6 PASS",
+    "space_state_wire": "npm run test:space-state  (== go test -tags state_integration -count=1 ./tests/space/...): drives REAL accepted stateapi handler in-process vs Space client on the isolated DB; 32 RUN / 32 PASS / 0 SKIP / 0 FAIL",
+    "suites": "npm run check | npm run smoke | npm run test:e2e (incl. whole-system) | npm run test:chaos | npm run test:load"
+  },
+  "open_gates": [
+    "G-LLM-QWEN",
+    "G-ACCEPT-COMPONENTS (space=changes_required / execution=candidate-absent / data=held per director 20261029T151940Z; whole-system acceptance gated on these)",
+    "G-INTEGRATION (space<->state wire GREEN in integrated tree 32/32; execution/data integration candidates not yet available)",
+    "G-TIER2A-2B-L4 (no k8s target)",
+    "G-COMPOSE-APP-BUILD (buildx perms + offline proxy)",
+    "G-CAPACITY (control-API p95 ~50ms local, target-runtime unproven)",
+    "G-IAM (Cloud.ru/RFC8693/external OAuth)",
+    "G-DISK (~18GiB<20; heavy full -race independent green-run not forced on this host)"
+  ],
+  "addendum_20261030": {
+    "added_at_utc": "2026-10-29T23:55:48Z",
+    "added_by": "delivery-contractor (hive-runtime)",
+    "purpose": "Additive supersession/refresh only. The 2026-10-29T15:40Z snapshot above is preserved verbatim as the record of what was imported at that time; nothing below retroactively rewrites that history.",
+    "canonical_composition_20261030": {
+      "attribution": "These SHAs are ISSUED/FROZEN BY THE DIRECTOR, recorded here for traceability; they are NOT independently verified by the delivery contractor. Git objects for these tips are ABSENT in the delivery scratch repo, so no tree-OID is asserted for them here.",
+      "director_frozen_pins": {
+        "space": {
+          "commit": "cdfc20c",
+          "status": "canonical FROZEN (linear superset of 66bbf41; delta = tests/space/handler_http_test.go only; diff 461aa2ce..cdfc20c -- internal/state internal/stateapi == EMPTY per director)"
+        },
+        "execution": {
+          "commit": "ecd5854",
+          "status": "candidate-frozen (replaces stale 73f6d86; liveQwen 3/3 PASS per director)"
+        },
+        "identity": {
+          "commit": "a65ebc1",
+          "status": "accepted"
+        },
+        "compute": {
+          "commit": "27cd4382",
+          "status": "accepted"
+        },
+        "state": {
+          "commit": "461aa2ce",
+          "status": "accepted"
+        }
+      }
+    },
+    "verified_this_turn": {
+      "verified_at_utc": "2026-10-29T23:55:48Z",
+      "state_plane_byte_identity": {
+        "claim": "delivery tree State-plane is byte-identical to accepted State 461aa2ce (in-ownership, directly computed by this contractor).",
+        "tree_oids": {
+          "internal/state": "bba4d150",
+          "internal/stateapi": "1c36f0a7",
+          "sdk/go/state": "44eea29f"
+        },
+        "matches_director_canonical": true
+      },
+      "product_unchanged_vs_composed": {
+        "claim": "internal/ + cmd/ + go.mod + go.sum byte-identical to composed 012a849 (downstream deltas are docs/ scripts/ tests/e2e/ only).",
+        "result": "IDENTICAL"
+      },
+      "compose_fresh_valid": {
+        "command": "docker compose -f compose.yaml --profile app --profile dev config --quiet",
+        "rc": 0,
+        "services": 8,
+        "healthchecks": 8
+      },
+      "tier_manifests_yaml_valid": {
+        "count": 11,
+        "ok": 11,
+        "fail": 0,
+        "tiers": {
+          "tier0": "ConfigMap+Deployment",
+          "tier1": "3 systemd .service + README",
+          "tier2a": "deployments+namespace+SAs",
+          "tier2b": "HPA+NetworkPolicy+PDB+RBAC (HA)"
+        },
+        "runbooks": "README.md present at manifests root and every tier"
+      },
+      "state_bundle_canonical_copy": {
+        "claim": "Canonical provenance copy of State 461aa2ce bundle now exists; the 15:40Z snapshot recorded bundle_path as EPHEMERAL because no copy existed under acceptance/state/ at that time (still true). The bundle content sha in the snapshot already matches this canonical copy.",
+        "path": "company-brain/acceptance/integration/delivery/state-block-461aa2ce.provenance.bundle",
+        "size_bytes": 69047,
+        "sha256": "f89ab6c92aa9756159478f2911198e8761666b5f4a59707e8a93170c72a270c6",
+        "matches_snapshot_bundle_sha256": true
+      }
+    },
+    "supersessions": {
+      "space_pin": {
+        "from": "cfc4357 (status_as_reported=changes_required; imported_byte_identical true at 15:40Z)",
+        "to": "cdfc20c",
+        "kind": "director canonical FROZEN",
+        "open_subitem": "Space tip provenance fold: delivery tree carries internal/space=830fadaa (== composed 012a849), which is neither the revoked cfc4357 (1c8ce67c) nor canonical cdfc20c (43486742). Cross-plane Space<->State fold at canonical tip is integration-validation/director lane (iv certified Space<->State 7/7+oracle); NOT asserted here."
+      },
+      "execution_pin": {
+        "from": "candidate-absent (at 15:40Z)",
+        "to": "ecd5854",
+        "kind": "director candidate-frozen"
+      },
+      "state_bundle_path": {
+        "from": "/tmp/state-block.bundle (EPHEMERAL label)",
+        "to": "canonical provenance bundle path under acceptance/integration/delivery/",
+        "kind": "path-refresh (content sha unchanged)"
+      },
+      "open_gates_refresh": {
+        "note": "Gates superseded by director forum #102 (2026-10-29T23:21Z): composed COMPONENT/SERVICE journey c67b3c6 ACCEPTED (component scope). The sole remaining composed-FULL gate is Emil-core :19080 (kvm-owned, MODEL_UNAVAILABLE root-cause LLM_API_BASE). Prototype remains UNACCEPTED; VM-plane (Tier-L4 target-runtime apply, compose-app image build, OTLP-collector target, whole-system -race) is iv/director lane.",
+        "sole_composed_full_gate": "G-EMIL-TOOL (Emil-core :19080, kvm-lab)"
+      }
+    }
+  }
+}

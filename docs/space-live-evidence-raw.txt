@@ -1,0 +1,14 @@
+=== RUN   TestLiveRealEndToEnd
+    live_real_journey_test.go:616: GET http://127.0.0.1:29000/minio/health/live -> 200
+    live_real_journey_test.go:616: GET http://127.0.0.1:18000/.well-known/agent-card.json -> 200
+    live_real_journey_test.go:616: live infra OK (mandatory): native-Qwen host=0038df35-f6e5-4958-a4ec-0b289a0b0aef.modelrun.inference.cloud.ru model=model-run-tqmbu-road; MinIO=http://127.0.0.1:29000; PG=127.0.0.1:25432; Emil(optional)=http://127.0.0.1:18000 reachable=true
+    live_real_journey_test.go:621: native-Qwen round-trip ok: stop="length" content_bytes=2
+    live_real_journey_test.go:625: real native-Qwen artifact content: bytes=546 stop="stop" sha=214cfe9b123ffc4e
+    live_real_journey_test.go:633: MANDATORY artifact via OUR save_artifact tool OK: bucket=ahp-space-live-d8380488c4be id=20261030T051501.862565000Z_pcu76j2jw7mddnvmw6bwhngkfe version=ce80f910-6d63-4332-9149-bbfcb1d3088b sha=214cfe9b123ffc4e PUT==GET bytes=546
+    live_real_journey_test.go:669: core loop (real Qwen + product save_artifact tool registered): model_steps=1 durable_emissions=2
+    live_real_journey_test.go:676: real Emil provenance hop OK: task=f32c9f38-13b7-4813-b4cd-d3798c734258 context=9520b3df-be0e-49e4-ad7d-692496f96d92 state=completed tool_calls=[core_skill_activate] builtin=true core_artifact_save=false reply="AHP-LIVE-AC10E17EC34D The only built-in tool I executed this turn was core_skill_activate, which activated the verification-before-completion skill."
+    live_real_journey_test.go:766: durable after restart: run=20261030T051507.477291000Z_ol5pxxkltnbfspimkwb2ocl26m status=done stream_events=1 artifact_version=ce80f910-6d63-4332-9149-bbfcb1d3088b sha=214cfe9b123ffc4e
+    live_real_journey_test.go:776: private-context OK: foreign scope -> NOT_FOUND on owner artifact (bytes do not leak)
+--- PASS: TestLiveRealEndToEnd (10.31s)
+PASS
+ok  	github.com/ahp-platform/ahp/tests/space	11.746s

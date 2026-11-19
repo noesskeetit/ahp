@@ -1,0 +1,232 @@
+{
+  "_about": "Векторы канонного digest'а. Значения digest порождена самой платформой: contracts.Digest по разобранному registry.Manifest и по json.RawMessage (go run ./web/testdata/digestvectors). Поэтому они — оракул для клиентской реализации web/aifactory/ahp-canonical.js. Проверка двусторонняя: web/aifactory_digest_test.go сверяет платформу, web/aifactory_canonical.test.mjs — браузерный код. Вектор ui-default — буквально форма publishManifest(\"h24-demo-agent\"), то есть UI публикует манифест, прошедший ValidateManifest ядра.",
+  "manifests": [
+    {
+      "name": "ui-default",
+      "note": "ровно форма web/aifactory/ahp-canonical.js:publishManifest(\"h24-demo-agent\") — её же сверяет node-тест",
+      "valid": true,
+      "digest": "sha256:cdc7c2eb4f661b700f594c16483421c911a6bf0ad0404d99a942523fd0cb96d9",
+      "manifest": {
+        "kind": "agent",
+        "system": "prototype.h24-demo-agent",
+        "visibility": "tenant",
+        "audience": "shared",
+        "class": "C",
+        "components": [
+          {
+            "name": "agent",
+            "a2a": true,
+            "min_replicas": 1,
+            "max_replicas": 1
+          }
+        ],
+        "state": {
+          "partition": "agent-h24-demo-agent"
+        },
+        "capabilities": {
+          "self_tasks": 0
+        },
+        "limits": {
+          "depth": 1,
+          "active_tasks": 1,
+          "task_timeout": "5m"
+        }
+      }
+    },
+    {
+      "name": "sparse-defaults",
+      "note": "незаполненные вложенные структуры: Go подставляет нули, каноника обязана совпасть; сам манифест намеренно невалиден (нет компонентов)",
+      "valid": false,
+      "digest": "sha256:96377379391a88495d4ddc2662d4b0f3f95dad188b0308273cad2352e7b808bc",
+      "manifest": {
+        "kind": "agent",
+        "system": "prototype",
+        "visibility": "tenant",
+        "audience": "personal",
+        "class": "S"
+      }
+    },
+    {
+      "name": "full-declaration",
+      "note": "все поля, включая значимые для omitempty: shared/compat/hooks/own_tables и непустые наборы полномочий",
+      "valid": true,
+      "digest": "sha256:de1bca99fb3c0b8f83097d573da6dfa702d33871ce7ae2e21e67f6997114959e",
+      "manifest": {
+        "kind": "agent",
+        "system": "prototype.a2a:v1",
+        "visibility": "tenant",
+        "audience": "shared",
+        "class": "C",
+        "components": [
+          {
+            "name": "agent",
+            "a2a": true,
+            "min_replicas": 1,
+            "max_replicas": 3
+          },
+          {
+            "name": "worker",
+            "a2a": false,
+            "min_replicas": 1,
+            "max_replicas": 2
+          }
+        ],
+        "state": {
+          "partition": "u-ahp-accept",
+          "shared": [
+            "ops",
+            "h24"
+          ],
+          "compat": "state-v1",
+          "drain": "7d",
+          "delete_hook": "hooks/delete",
+          "own_tables": true
+        },
+        "capabilities": {
+          "models": [
+            "qwen-max"
+          ],
+          "tools": [
+            "artifacts.save"
+          ],
+          "memory": [
+            "memory:read"
+          ],
+          "compute": [],
+          "calls": [
+            "agent:prototype.a2a:v1"
+          ],
+          "self_tasks": 2
+        },
+        "limits": {
+          "depth": 3,
+          "active_tasks": 5,
+          "task_timeout": "45s"
+        }
+      }
+    },
+    {
+      "name": "unknown-fields",
+      "note": "та же форма UI плюс незнакомые транспортному типу поля: они выпадают до хеширования",
+      "valid": true,
+      "digest": "sha256:cdc7c2eb4f661b700f594c16483421c911a6bf0ad0404d99a942523fd0cb96d9",
+      "same_digest_as": "ui-default",
+      "manifest": {
+        "kind": "agent",
+        "system": "prototype.h24-demo-agent",
+        "visibility": "tenant",
+        "audience": "shared",
+        "class": "C",
+        "components": [
+          {
+            "name": "agent",
+            "a2a": true,
+            "min_replicas": 1,
+            "max_replicas": 1,
+            "unknown_image": "ghcr.io/x/y:latest"
+          }
+        ],
+        "state": {
+          "partition": "agent-h24-demo-agent",
+          "owner": "whoever"
+        },
+        "capabilities": {
+          "self_tasks": 0
+        },
+        "limits": {
+          "depth": 1,
+          "active_tasks": 1,
+          "task_timeout": "5m"
+        },
+        "x_client": "ai-factory",
+        "revision": 7
+      }
+    },
+    {
+      "name": "immutable-image",
+      "note": "Known Image field participates in digest; immutable image is accepted by Registry.",
+      "valid": true,
+      "digest": "sha256:5f172bed2f91766d95c0a6f0b66b66b4b4115694140f7f5ccd7f5924ce3d468e",
+      "manifest": {
+        "kind": "agent",
+        "system": "prototype.h24-demo-agent",
+        "visibility": "tenant",
+        "audience": "shared",
+        "class": "C",
+        "components": [
+          {
+            "name": "agent",
+            "a2a": true,
+            "min_replicas": 1,
+            "max_replicas": 1,
+            "image": "registry.example.test/agent@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ],
+        "state": {
+          "partition": "agent-h24-demo-agent"
+        },
+        "capabilities": {
+          "self_tasks": 0
+        },
+        "limits": {
+          "depth": 1,
+          "active_tasks": 1,
+          "task_timeout": "5m"
+        }
+      }
+    }
+  ],
+  "canonical_values": [
+    {
+      "name": "html-escaping",
+      "note": "encoding/json экранирует <,>,& в \\uXXXX — каноника идёт этими байтами",
+      "digest": "sha256:f37e1d8f5c82f1db625c72bdde90cf6f9a43aa574bd2f07895ab04b59925da11",
+      "value": {
+        "a": "<b>&c"
+      }
+    },
+    {
+      "name": "key-order",
+      "note": "сортировка ключей по байтам UTF-8",
+      "digest": "sha256:205478b3a1510d0600008f1c30c5f52e5485f87150e21907ac2a6a0fc7846d57",
+      "value": {
+        "b": 1,
+        "a": {
+          "z": 1,
+          "a": [
+            1,
+            2,
+            3
+          ]
+        },
+        "0": "x"
+      }
+    },
+    {
+      "name": "unicode",
+      "note": "нелатиница: сортировка по UTF-8, а не по кодовым единицам UTF-16",
+      "digest": "sha256:d523c2e464a2f76a2b2c72e133e71f14d0d4df46b86f18389f791588b9723aca",
+      "value": {
+        "ключ": "значение",
+        "е": [
+          {
+            "к": ""
+          }
+        ],
+        "~t": [
+          true,
+          false,
+          null
+        ]
+      }
+    },
+    {
+      "name": "escapes",
+      "note": "управляющие символы, обратный слеш и U+2028/U+2029",
+      "digest": "sha256:a9b1f33f4eebb4be927cf3e271590d35fc56647a27a66a7fc863455a6a40d8ec",
+      "value": {
+        "s": "a\"b\\c\nd e f"
+      }
+    }
+  ]
+}

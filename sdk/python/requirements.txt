@@ -1,0 +1,31 @@
+# Python dependencies for the AHP State SDK and its LangGraph adapters.
+#
+# The raw State protocol client (ahp_state/client.py, ahp_state/session.py)
+# is STDLIB-ONLY (http.client + ssl + json): it needs nothing from this list
+# to talk to the durable State HTTP API over mTLS + a bound task token.
+#
+# The pins below are the exact versions verified end-to-end for THIS block
+# against the real AHP State HTTP backend (interrupt/resume, durable
+# checkpoints, pending writes, KV CAS). They are required only for the
+# LangGraph adapters:
+#   * ahp_state/checkpoint_saver.py -> AHPCheckpointSaver  (langgraph.checkpoint.*)
+#   * ahp_state/store.py         -> AHPStore            (langgraph.store.*)
+# ...and for the adapter test-suite (tests/), which builds a real StateGraph.
+#
+# ahp_state/requirements.txt holds the minimal sub-set for the adapters alone;
+# this file is the full set used by tests/state/run_acceptance.sh.
+# Native langgraph.checkpoint.postgres (PostgresSaver) is intentionally NOT a
+# dependency: state MUST flow through the AHP State HTTP API.
+
+langgraph==0.6.11
+langgraph-checkpoint==2.1.2
+langgraph-sdk==0.2.9
+langgraph-prebuilt==0.6.5
+langchain-core==0.3.86
+ormsgpack>=1.0.0
+
+# Pulled transitively (langgraph-sdk / langchain-core). Not imported directly
+# by ahp_state (the client uses stdlib http.client), pinned here only so the
+# verified toolchain is reproducible.
+httpx>=0.27,<0.29
+pydantic>=2,<3

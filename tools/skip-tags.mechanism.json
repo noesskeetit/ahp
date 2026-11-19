@@ -1,0 +1,62 @@
+[
+  {
+    "tag": "artifact_parser",
+    "class": "trusted_parser_env",
+    "status": "canonical"
+  },
+  {
+    "tag": "artifact_plane",
+    "class": "real_store_env",
+    "status": "canonical"
+  },
+  {
+    "tag": "database",
+    "class": "database_env",
+    "status": "transition"
+  },
+  {
+    "tag": "dot_e2e_layout",
+    "class": "harness_precondition_env",
+    "status": "canonical"
+  },
+  {
+    "tag": "dot_e2e_llm",
+    "class": "harness_precondition_env",
+    "status": "canonical"
+  },
+  {
+    "tag": "dot_e2e_optin",
+    "class": "opt_in_only",
+    "status": "transition"
+  },
+  {
+    "tag": "dot_e2e_python",
+    "class": "harness_toolchain_env",
+    "status": "canonical"
+  },
+  {
+    "tag": "git_worktree",
+    "class": "harness_precondition_env",
+    "status": "canonical"
+  },
+  {
+    "tag": "postgres",
+    "class": "database_env",
+    "status": "canonical"
+  },
+  {
+    "tag": "real_deps",
+    "class": "real_store_env",
+    "status": "deprecated"
+  },
+  {
+    "tag": "secret_store_dir",
+    "class": "harness_precondition_env",
+    "status": "canonical"
+  },
+  {
+    "tag": "source_revision",
+    "class": "harness_precondition_env",
+    "status": "canonical"
+  }
+]

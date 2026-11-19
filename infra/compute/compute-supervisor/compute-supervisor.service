@@ -1,0 +1,38 @@
+# systemd unit for the class X microVM supervisor (Linux/KVM nodes only).
+#
+# Install as ahd-compute-supervisor.service (name is illustrative). The unit
+# only starts the supervisor; the control plane (compute-host serve) runs as a
+# separate unit. On a host WITHOUT /dev/kvm the supervisor exits non-zero on the
+# "Unavailable: KVM not available" gate, and Restart keeps it from silently
+# pretending to be healthy — the external gate stays visible in `systemctl`.
+
+[Unit]
+Description=AHP compute class X microVM supervisor (Firecracker)
+Documentation=file:///opt/ahp/company-brain/infra/compute/compute-supervisor/README.md
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Image/tool paths and the socket live in this env file. It must NOT contain
+# secrets; images are provided externally by the kvm-lab operator.
+EnvironmentFile=/etc/ahp/compute-supervisor.env
+# Pre-flight: refuse to keep flapping if the node is not actually ready. This
+# makes the missing-KVM gate loud instead of looping a fake supervisor.
+ExecStartPre=/opt/ahp/company-brain/infra/compute/compute-supervisor/kvm-check.sh
+ExecStart=/opt/ahp/bin/compute-host supervise
+Restart=on-failure
+RestartSec=5s
+
+# Hardening. Uncomment User/Group after creating a dedicated service user that
+# is a member of the 'kvm' group (created by setup.sh).
+# User=ahp-compute
+# Group=kvm
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/ahp /var/lib/ahp-compute
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

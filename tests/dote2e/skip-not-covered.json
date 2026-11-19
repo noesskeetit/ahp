@@ -1,0 +1,7 @@
+[
+  {
+    "package": "github.com/ahp-platform/ahp/tests/dote2e",
+    "name": "TestModelPlaneFaultIsolation",
+    "justification": "DEF-DOTE2E-2 is only measurable when the fault reproduces on the stand tenant; when it does not, the leg records verdict=INFO in the artifact and skips. That is not-covered on this tenant, NOT a pass: the artifact carries the localisation it observed, and the acceptance reader refuses an artifact whose legs do not prove what they claim."
+  }
+]

@@ -1,0 +1,33 @@
+# Tier 0 · Shared SaaS — конфигурация логической + криптографической изоляции.
+# PDF §10: "логическая изоляция, общий пул"; гарантия ИБ — "логическая и
+# криптографическая изоляция · SMB и разработчики".
+#
+# ВНИМАНИЕ: значения ниже — ШАБЛОНЫ. Никаких реальных ключей/DSN здесь нет и
+# быть не должно (секреты — только в Secret/KMS). Это выражает КОНТРАКТ RLS и
+# per-tenant KMS, а не конфигурацию живого стенда.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ahp-rls-kms
+  namespace: ahp-shared
+data:
+  # PostgreSQL Row-Level Security: политика ограничивает каждую строку по
+  # tenant_id из сессии приложения. Применяется миграцией (cmd/ahp migrate).
+  rls_policy_sql: |
+    -- Включить RLS на tenant-scoped таблицах State Store.
+    ALTER TABLE threads ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE runs      ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE checkpoints ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY tenant_isolation_threads
+      ON threads USING (tenant_id = current_setting('ahp.tenant_id')::uuid);
+    CREATE POLICY tenant_isolation_runs
+      ON runs USING (tenant_id = current_setting('ahp.tenant_id')::uuid);
+    CREATE POLICY tenant_isolation_checkpoints
+      ON checkpoints USING (tenant_id = current_setting('ahp.tenant_id')::uuid);
+  # Приложение обязано выставить сессионный GUC перед запросами от имени tenant.
+  rls_session_guc: "ahp.tenant_id"
+  # Шаблон ссылки на KMS-ключ шифрования данных покоя для каждого tenant.
+  # Реальный ключ — в KMS (Cloud.ru KMS / Vault), сюда попадает только keyref.
+  kms_keyref_template: "ahp/tenants/{tenant_id}/master"
+  # Телеметрия без содержимого (обязательно на всех уровнях, §10).
+  telemetry_mode: "no-content"

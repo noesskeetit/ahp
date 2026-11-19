@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+# Multi-stage build of the ahp binary for a dev / containerized deployment.
+# Build context must be the repository root (compose.yaml:99-101); .dockerignore
+# keeps root-level build outputs and local scratch out of that context, so this
+# image is always compiled from the sources in front of it and never inherits a
+# compiled binary that happened to be lying in the tree (DEF-LANE-TRACKED-BINARY).
+#
+# WHAT THIS IMAGE IS NOT: it is not an acceptance or measurement subject, and it
+# carries no build provenance. Two independent reasons:
+#   1. the context has no .git (see .dockerignore), so -buildvcs is impossible here;
+#      REVISION below lands in a LABEL and in -X main.version, which is metadata,
+#      not the Go build-info stamp that `go version -m` reports;
+#   2. it builds WITHOUT the canonical tags ahp_exec,ahp_data. 88 files are
+#      tag-guarded, so this is a different program from the attested canon.
+# Self-describing, attested binaries come from scripts/build-product.sh (one
+# binary; refuses to publish unless go version -m reports vcs.revision == HEAD and
+# vcs.modified == false) and from scripts/build-candidate.sh, whose ahp image is
+# built by COPYing the SAME VCS-stamped linux binary instead of compiling blind
+# (scripts/build-candidate.sh:262-264, docs/candidate-build/README.md:26).
+# Keeping those two paths visibly separate is the point: an image that cannot
+# prove its revision must not look like one that can.
+#
+# REVISION is the pinning hook for callers that know what they are building
+# (compose.yaml passes AHP_BUILD_REVISION). Nothing in this image verifies it --
+# it cannot -- so an unset value stays "unset" instead of pretending to be a pin.
+
+FROM golang:1.26.11-alpine AS builder
+RUN apk add --no-cache ca-certificates
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+ARG REVISION=unset
+RUN CGO_ENABLED=0 GOOS=linux go build -buildvcs=false \
+      -ldflags="-s -w -X main.version=${VERSION}" -o /out/ahp ./cmd/ahp
+
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates
+ARG REVISION=unset
+LABEL org.opencontainers.image.title="ahp-dev" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.description="dev build: no VCS build-info, compiled without ahp_exec/ahp_data -- not an acceptance subject"
+COPY --from=builder /out/ahp /usr/local/bin/ahp
+EXPOSE 8080
+ENTRYPOINT ["ahp"]
+CMD ["--role", "all", "--listen", ":8080"]

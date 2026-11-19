@@ -1,0 +1,219 @@
+{
+ "schema": "ahp.lane-acceptance.v2",
+ "lane": "state-owner",
+ "blocks": [
+  "M2",
+  "M4"
+ ],
+ "generated_at": "2026-10-31T06:59:49Z",
+ "branch": "state-owner-20261031",
+ "head": "37ba3486a79d560fdeeb51a7d7532ada371c10fc",
+ "dirty_files": 0,
+ "candidate_base": "21680e1 (accepted M1, inside pin 1370d01/18a2268)",
+ "commits": [
+  "37ba348 fix(transport): a flattened 400 keeps its domain code as a stable reason",
+  "0d8f9f9 test(state): kill the backend mid-transaction and prove the rollback is clean",
+  "e24fc4c feat(state): public State stand and consumer driver as real commands",
+  "d28b727 test(state): the KV idempotency receipt is addressed by operation_key alone"
+ ],
+ "rules": {
+  "binary_hash_compared": false,
+  "binary_hash_reason": "Go is built without -trimpath on this platform, so a binary sha256 is machine-specific; the candidate is identified by head + dirty diff + this inventory",
+  "author_is_verifier": false,
+  "acceptance_owner": "hive-director"
+ },
+ "commands": {
+  "build": "go build ./...",
+  "stand_build": "go build -o /tmp/state-candidate-<short>/state-stand ./cmd/state-stand",
+  "probe_build": "go build -o /tmp/state-candidate-<short>/state-consumer ./cmd/state-consumer",
+  "vet": "go vet ./internal/state/... ./internal/stateapi/... ./cmd/state-stand/... ./cmd/state-consumer/... ./pkg/transport/... ./tests/state/...",
+  "unit_and_integration": "go test -p 1 -race -count=1 -timeout 45m -v ./internal/state/... ./internal/stateapi/... ./pkg/transport/...",
+  "transport": "go test -p 1 -race -count=1 -timeout 20m -v ./pkg/transport/... (not lane-owned, changed by this candidate)",
+  "out_of_process": "go test -p 1 -race -count=1 -timeout 30m -v ./tests/state/...",
+  "http_e2e": "./tests/state/serve/run-http-e2e.sh",
+  "wrapper": "python3 /home/alex/ahp-hive/tools/ahp-lock-run.py --lock /home/alex/ahp-hive/run/build.lock --wait 7200 -- sh /home/alex/ahp-hive/run/state-owner-20261031/tools/final-gates.sh",
+  "environment": "GOFLAGS='-mod=mod -buildvcs=false', env -u AHP_S3_ENDPOINT, database ahp_hive_state_owner (private/root-acceptance-pg/state-owner.env, name only)"
+ },
+ "exit_codes": {
+  "build": 0,
+  "vet": 0,
+  "go_test": 0,
+  "stand_build": 0,
+  "probe_build": 0,
+  "transport": null,
+  "tests_state": 0,
+  "http_e2e": 0
+ },
+ "test_counts": {
+  "unit_and_integration": {
+   "pass": 98,
+   "fail": 0,
+   "skip": 0,
+   "packages_ok": 6,
+   "packages_fail": 0
+  },
+  "out_of_process": {
+   "pass": 26,
+   "fail": 0,
+   "skip": 0,
+   "packages_ok": 1,
+   "packages_fail": 0
+  },
+  "transport": {
+   "pass": 0,
+   "fail": 0,
+   "skip": 0,
+   "packages_ok": 0,
+   "packages_fail": 0,
+   "folded_into": "unit_and_integration (./pkg/transport/... runs in the same go test invocation)"
+  },
+  "total": {
+   "pass": 124,
+   "fail": 0,
+   "skip": 0
+  }
+ },
+ "http_e2e": {
+  "summary_line": "state-consumer: calls=104 failures=0 ops_succeeded=37/37 missing=",
+  "evidence": "/home/alex/ahp-hive/run/state-owner-20261031/evidence/state-http-e2e-20261031T065908Z.jsonl",
+  "evidence_sha256": "7104e4ac4e78566a667fd860418a559c631d20390f32d28579b3389dd79096b7",
+  "identity_manifest": "/home/alex/ahp-hive/run/state-owner-20261031/evidence/candidate-identity-20261031T065908Z.json",
+  "identity_manifest_sha256": "48c4f21cae937c26fb1b39edf9e78fcb6cf2c196dc1259add03b3c133162fce2",
+  "records": 105,
+  "status_histogram": {
+   "0": 2,
+   "200": 68,
+   "400": 11,
+   "403": 3,
+   "404": 11,
+   "409": 9
+  },
+  "error_codes_seen": {
+   "CONFLICT": 5,
+   "FORBIDDEN": 3,
+   "INVALID_ARGUMENT": 11,
+   "NOT_FOUND": 11,
+   "STALE_EPOCH": 4
+  },
+  "operations_covered_with_success": 37,
+  "operations": [
+   "AckInbox",
+   "AppendStream",
+   "ClaimRun",
+   "CreateRun",
+   "CreateThread",
+   "DeleteKV",
+   "DeleteSubject",
+   "DeleteThread",
+   "Enqueue",
+   "ExportThread",
+   "GetCheckpoint",
+   "GetIntent",
+   "GetKV",
+   "GetPart",
+   "GetRun",
+   "GetThread",
+   "GetThreadByContext",
+   "GetWrites",
+   "Heartbeat",
+   "ImportThread",
+   "ListCheckpoints",
+   "ListRuns",
+   "ListThreads",
+   "PutBatch",
+   "PutCheckpoint",
+   "PutKV",
+   "PutWrites",
+   "ReadInbox",
+   "ReadStream",
+   "ReconcileIntent",
+   "RecordIntent",
+   "Release",
+   "RemoveLegalhold",
+   "SearchKV",
+   "SetLegalhold",
+   "Suspend",
+   "UpdateIntent"
+  ],
+  "deviated_calls": [],
+  "failed_assertions": []
+ },
+ "artifact_note": "Артефакт закоммичен в ленту отдельным docs-only коммитом, который является непосредственным потомком этого head и не меняет код.",
+ "operational_findings": [
+  "Прогон гейтов на этом же head в 06:01:xxZ дал FAIL=5/26 с SQLSTATE 28P01: прораб в 06:03:00Z ротировал пароль роли ahp_hive_state_owner (закрытие инцидента с DSN, пост 20261031T060525Z), то есть кред сменился ПОСРЕДИ прогона. Это не дефект кандидата: код не менялся, изменилась среда. С этого момента прогон сам фиксирует sha256 env-файла до и после и число 28P01, чтобы такой красный нельзя было ни принять, ни спутать с регрессией.",
+  "Ленточный прогон обязан использовать строго абсолютный путь к env-файлу и таргетный -p 1: относительный путь уже давал тихие SKIP, а тихий SKIP считается провалом харнесса."
+ ],
+ "environment_probe": {
+  "db_env_sha256_before": "6bd274159f307e1eace9b10144ce60cb540b6cd3f7f4a2d654d94456a5ceb61e",
+  "db_env_sha256_after": "6bd274159f307e1eace9b10144ce60cb540b6cd3f7f4a2d654d94456a5ceb61e",
+  "db_env_mtime_before_utc": "2026-10-31T06:03:00Z",
+  "db_auth_errors_28P01": 0,
+  "gate_script_sha256": "702430151220d885914299a70f1d4ed56317784577f644d147a8849b36ed5c1d"
+ },
+ "source_inventory_against_base": [
+  {
+   "path": "cmd/state-consumer/main.go",
+   "sha256": "ce3795eb8a8e9b5d0261a2cf4de5e02385d009ff0c85ede3e0766803a8f79d18"
+  },
+  {
+   "path": "cmd/state-stand/main.go",
+   "sha256": "733679e2ea4da045ecc47aa55c566d46c87d040ad7e28abe9e045a43b7ad802d"
+  },
+  {
+   "path": "internal/state/crashrollback_test.go",
+   "sha256": "94dbbcd678ade3912be5e3fd11f35dc751e74cb060cb46c652deb390b7906a63"
+  },
+  {
+   "path": "internal/state/idempotency_test.go",
+   "sha256": "7c67b9c2634ffad8963ddf42805216e785101f4149c045e08c01135546cceffe"
+  },
+  {
+   "path": "internal/stateapi/consumer/consumer.go",
+   "sha256": "ad3c7a0938630232f06a354b0cf4d26b9124c67b6d790766183477ee26b1358e"
+  },
+  {
+   "path": "internal/stateapi/consumer/consumer_test.go",
+   "sha256": "572dae8ab50e633d68c31a87ecb32e1de2f65a2c4a0f08ffd178b041d30693da"
+  },
+  {
+   "path": "internal/stateapi/stand/config.go",
+   "sha256": "0c97ad90bbd18e3c7a5724fb773e51327cfc2c150696a340c074f55b7d6dbda1"
+  },
+  {
+   "path": "internal/stateapi/stand/config_test.go",
+   "sha256": "d7e7b9dadc04400d40946c4ef6a105d543405c66ff61ec5343f02d517b3988b9"
+  },
+  {
+   "path": "internal/stateapi/stand/stand.go",
+   "sha256": "efe772227488a19974fd192a655f1b7fa7682d750e2314f45d817778bb559f53"
+  },
+  {
+   "path": "pkg/transport/json.go",
+   "sha256": "83bc579bc2b5ebc962848eaa251aeb743498f45901a0a3d595bfc1ab3e08f1c0"
+  },
+  {
+   "path": "pkg/transport/json_test.go",
+   "sha256": "0250bbc9218757133194df1c6e05772dbd1a46513e8f36eea182b7c92995bbc7"
+  },
+  {
+   "path": "tests/state/README.md",
+   "sha256": "0db86cc820c706f6a6d36f27b53bfcbe47513d9812d28412a6ed9fab03820a16"
+  },
+  {
+   "path": "tests/state/httpprobe/main.go",
+   "sha256": "f823fde79d7de1e5046fb2f7e5ad659f1041fa221dbad1d7284da6c50f4d3c1e"
+  },
+  {
+   "path": "tests/state/run_acceptance.sh",
+   "sha256": "4218e908fd17bb6a127e4987f209fcf77bf1cfe80190ec9a020af38944ae9ed1"
+  },
+  {
+   "path": "tests/state/serve/main.go",
+   "sha256": "beadd2d497dac4bd851435545d4c49c0eb7f5cdcc7182d08bffcd3310f02fb33"
+  },
+  {
+   "path": "tests/state/serve/run-http-e2e.sh",
+   "sha256": "eb4731e6ad11bc598e65e01159adddd0c553af98b918feb7e063e7d836306ca9"
+  }
+ ]
+}

@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "name": "probe-restricted-only",
+      "class": "restricted",
+      "audience": {
+        "kind": "tenant"
+      },
+      "secret_ref": "ahp-hive/execution/probe",
+      "models": [
+        "probe-model-not-routed"
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "name": "restricted-class-only",
+      "when": {
+        "classes": [
+          "restricted"
+        ]
+      },
+      "then": {
+        "provider": "probe-restricted-only",
+        "model": "probe-model-not-routed"
+      }
+    }
+  ]
+}

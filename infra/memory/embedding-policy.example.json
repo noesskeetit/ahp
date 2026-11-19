@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "providers": [
+    {"name":"fm-memory-synthetic","subject_from_scope":true,"audience":{"kind":"private"},"secret_ref":"AHP_MEMORY_EMBEDDING_KEY_FILE","models":["BAAI/bge-m3"]}
+  ],
+  "routes": [
+    {"name":"synthetic-only","when":{"tenants":["synthetic-memory-demo"],"model_prefixes":["BAAI/bge-m3"],"taints_none":["secret"]},"then":{"provider":"fm-memory-synthetic","model":"BAAI/bge-m3"}}
+  ]
+}

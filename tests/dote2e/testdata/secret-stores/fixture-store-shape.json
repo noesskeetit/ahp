@@ -1,0 +1,16 @@
+{
+  "_purpose": "Tracked fixture for the secret-hygiene legs. Every value below is SYNTHETIC, written by hand for this fixture: it is not an operational credential and never was. The fixture exists so the legs prove the same harvest rule (key-name markers + length floor) in ANY checkout of the exact SHA, instead of depending on an untracked credential store outside the repository (DEF-TEST-CHECKOUT-COUPLING).",
+  "_negative_controls": "notes_bundle_path carries a long value under a NON-marker key and must NOT be harvested; deployment_token_short carries a marker key but a value below the length floor and must NOT be harvested. If either ever is harvested, the rule was widened and these legs stop meaning what they say.",
+  "lane_native_store": {
+    "database": {
+      "ahp_test_db_password": "synthetic-fixture-value-alpha-9f2c4b70-not-a-credential"
+    },
+    "object_store": {
+      "ahp_object_access_key": "synthetic-fixture-value-beta-41d8e6a5-not-a-credential",
+      "notes_bundle_path": "/synthetic/path/that/has/no/credential/marker/5b8e1c34"
+    },
+    "legs": [
+      { "j1_sample_leg_token": "synthetic-fixture-value-gamma-7c30f2d9-not-a-credential" }
+    ]
+  }
+}

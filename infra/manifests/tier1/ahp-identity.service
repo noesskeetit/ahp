@@ -1,0 +1,21 @@
+[Unit]
+Description=AHP identity service
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/ahp --role identity --listen 127.0.0.1:8082
+EnvironmentFile=/etc/ahp/identity.env
+Restart=always
+RestartSec=3
+NotifyAccess=main
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ahp/identity
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

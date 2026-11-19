@@ -1,0 +1,44 @@
+# Local dependencies for the real Go composition. Not an application deployment.
+# Merge with compose.yaml; Hindsight's API is reachable only on host loopback.
+name: ahp-handbook
+services:
+  memory-hindsight-db:
+    networks: [memory-hindsight]
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: hindsight
+      POSTGRES_DB: hindsight
+      POSTGRES_PASSWORD: ${AHP_HINDSIGHT_DB_PASSWORD:?set a local hex password}
+    volumes: ["memory-hindsight-db:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hindsight -d hindsight"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  memory-hindsight-api:
+    networks: [memory-hindsight]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    image: ${AHP_HINDSIGHT_IMAGE:-ghcr.io/vectorize-io/hindsight:1.1.0}
+    environment:
+      HINDSIGHT_API_DATABASE_URL: postgresql://hindsight:${AHP_HINDSIGHT_DB_PASSWORD:?set a local hex password}@memory-hindsight-db:5432/hindsight
+      HINDSIGHT_API_LLM_PROVIDER: openai
+      HINDSIGHT_API_LLM_BASE_URL: ${AHP_HINDSIGHT_MODEL_BASE_URL:?approved internal OpenAI-compatible endpoint}
+      HINDSIGHT_API_LLM_MODEL: ${AHP_HINDSIGHT_MODEL:?select the extraction and consolidation model}
+      HINDSIGHT_API_LLM_API_KEY: ${AHP_HINDSIGHT_MODEL_API_KEY:?provide locally}
+      HINDSIGHT_API_ENABLE_BANK_CONFIG_API: "true"
+      HINDSIGHT_API_STORE_DOCUMENT_TEXT: "false"
+      HINDSIGHT_API_ENABLE_OBSERVATIONS: "true"
+      HINDSIGHT_API_ENABLE_AUTO_CONSOLIDATION: "true"
+      HINDSIGHT_API_VECTOR_INDEX_MIN_ROWS: "10000"
+      HF_HOME: /home/hindsight/.cache/huggingface
+    ports: ["127.0.0.1:${AHP_HINDSIGHT_PORT:-38888}:8888"]
+    volumes: ["memory-hindsight-models:/home/hindsight/.cache/huggingface"]
+    depends_on:
+      memory-hindsight-db:
+        condition: service_healthy
+volumes:
+  memory-hindsight-db: {}
+  memory-hindsight-models: {}
+
+networks:
+  memory-hindsight: {}

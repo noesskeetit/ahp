@@ -1,0 +1,60 @@
+# PRE_FREEZE_MANIFEST — mac-sdk-ci SDK candidate rev 7 (real PG + real HTTP validated)
+# Generated: 2026-10-31T00:06:25Z
+# git HEAD (base) = c8ab894d4d3d1da092679174d14f22e2f33678c1   branch = swarm/mac-sdk-ci-rev4
+# NOTE: working tree holds the rev7+ candidate (uncommitted; git writes are root/foreman
+#       scope — freeze.sh runs as root). freeze.sh stages whole dirs; this manifest lists
+#       the exact staged file set (git ls-files tracked + untracked-not-ignored). The
+#       verifier re-hashes these paths post-commit and must get an exact match. This
+#       manifest is intentionally NOT self-hashed.
+# internal/state/{checkpoint_parts,kv}.go are the frozen c8ab894 compile-fix lines only
+#       (unchanged; listed because freeze.sh commits them). State product code NOT edited.
+# real-PG e2e (tests/sdk/e2e_pg_test.go), real-HTTP (tests/sdk/http_real_test.go) and the
+#       F2 crash-window gate (tests/sdk/f2_crash_test.go + sdks/python/tests/f2_agent.py)
+#       run against VM1 ahp_hive_iv_sdk over an SSH tunnel — see forum report.
+# Format: git-blob-sha1 (git hash-object)  relative/path
+
+4361c0c459dcda2efe15c06d35a6f40dbf0d436b  acceptance/mac-sdk-ci/HANDOFF.md
+74d7cfc7e30172bc3f63b7c81400b2d6c56abba7  acceptance/mac-sdk-ci/check.sh
+7404219389158312572f051217b11adcfa61fe4f  acceptance/mac-sdk-ci/freeze.sh
+e322c5f7b0099b39c15bc5dec1017b7be831aca8  docs/sdk/README.md
+624f3fec0ddd45f0f3768cbf720dcc84ec54d1f7  internal/state/checkpoint_parts.go
+86c6141fbea181929d66751dc0f6c422a5b95b45  internal/state/kv.go
+1fcc1c538a7c2a5ede2def517737f92b52cde72b  pkg/sdk/a2a_executor.go
+afc42641604404206fcbe43d64d5e9544a33c06f  pkg/sdk/app.go
+21e0da413a22fea43687b77f336e81e4c28ad257  pkg/sdk/check/check.go
+cecc7f78a9acb7128d0d2f63b43983f643d6a377  pkg/sdk/check/check_test.go
+cd93a38f83705f7fa3e5074f448a512009e3519c  pkg/sdk/check/tokenflow.go
+e5fd9f7294c8b43e879f781277a772a42942bbe9  pkg/sdk/check/tokenflow_test.go
+200890267b42c23a06a34c52cd294e94cdbdd91a  pkg/sdk/checkpoint.go
+e391302455b8383712727e604cdf2e016cfbcdd0  pkg/sdk/cmd/ahp-sdk-check/main.go
+59b2e2713df6a8967abad01f0eef15d459c5571a  pkg/sdk/config.go
+fd35f20583cfc0a64f5f9564ae46a62e534f3a2c  pkg/sdk/intent.go
+b04bd76a718e6c96f223c57c2c61166cf8260f34  pkg/sdk/lease.go
+7ae9d2d47c8272168882c101543261d8154857cb  sdk/go/state/checkpoints.go
+88c9272f90a9d97583584d8f39f31b95c8817d22  sdk/go/state/client.go
+b54c453a2cf6677a1f62e2b5c88c1e9cc01c596f  sdk/go/state/client_test.go
+646d25dd54579a7c45e4d762a3b3a16c43474c1e  sdk/go/state/control.go
+1e130f2c25f051b28f9e8ce6517e15840eaa5dec  sdk/go/state/inbox.go
+f7001895e5df490c0c19463fd458071328501495  sdk/go/state/intents.go
+54cbd8b7b9e91050f0947aae4ded4db04d31252f  sdk/go/state/kv.go
+17ac67e7861b7df7fd800256d29d0d4adb1d50da  sdk/go/state/ops_test.go
+8e23ddf0976e3460bf6bf197b5d27dac65bbc178  sdk/go/state/runs.go
+0cf31a0f59b81dd5f4772cfd95c11c6e21173f13  sdk/go/state/stream.go
+564950f88b9aeaf7d07c5368b1bca7f00683a54b  sdk/go/state/types.go
+ec69fe3834ea359ad2f4652d1260fe5eba3ed527  sdks/python/.gitignore
+3e977c7c7ede5d890a9ab6978bb670ed7bf8d62a  sdks/python/ahp_langgraph/__init__.py
+e6f45e9b8973acffecc986f28ccc7f98e0fcd883  sdks/python/ahp_langgraph/checkpoint_saver.py
+7b5a7a8177255424036d4fcc299ac5d1511ba987  sdks/python/ahp_langgraph/client.py
+9334e1b8d0c3e0232b57a558f4a005e42846d724  sdks/python/ahp_langgraph/intents.py
+437ac79d04a85769ffcadac34b3d066cd3a044c0  sdks/python/ahp_langgraph/store.py
+e68eb9d99fe39c7adaef9a37e9f4d225b018a6d1  sdks/python/pyproject.toml
+9f66426eacc055cd74b2809ada63a81b7afefec4  sdks/python/tests/f2_agent.py
+d4b2024f0e4534dd9cb096ffa36dac753a6bd980  sdks/python/tests/test_adapter_behavior.py
+52c7fa42bf0adefc0f3546ad9c68a4f82811c595  sdks/python/tests/test_conformance.py
+230fdb282e0c6da25f498c0b4e38d7308e2c7be9  sdks/python/tests/test_rev6_fixes.py
+4154b725ea21321d184ef01eab3985c03e90f145  sdks/python/tests/test_rev7_adversarial.py
+9a40719876dff68b1c134472f13b1aff01a465dd  sdks/python/tests/test_sync_and_delete.py
+018addf238dbfc0025ab745310f4902304e0ea1c  tests/sdk/e2e_pg_test.go
+2995f8311b917ad7a4a586f0681de5122594252c  tests/sdk/f2_crash_test.go
+be6d338ad217a138a438dc26ee2c1972778b8f20  tests/sdk/http_real_test.go
+90bd9e9ca75b4ef0e037b2ae4adc8b02cd2aff27  tests/sdk/sdk_test.go

@@ -1,0 +1,217 @@
+{
+  "manifests": [
+    {
+      "name": "ui-default",
+      "note": "ровно форма web/aifactory/ahp-canonical.js:publishManifest(\"h24-demo-agent\") — её же сверяет node-тест",
+      "manifest": {
+        "kind": "agent",
+        "system": "prototype.h24-demo-agent",
+        "visibility": "tenant",
+        "audience": "shared",
+        "class": "C",
+        "components": [
+          {
+            "name": "agent",
+            "a2a": true,
+            "min_replicas": 1,
+            "max_replicas": 1
+          }
+        ],
+        "state": {
+          "partition": "agent-h24-demo-agent"
+        },
+        "capabilities": {
+          "self_tasks": 0
+        },
+        "limits": {
+          "depth": 1,
+          "active_tasks": 1,
+          "task_timeout": "5m"
+        }
+      }
+    },
+    {
+      "name": "sparse-defaults",
+      "note": "незаполненные вложенные структуры: Go подставляет нули, каноника обязана совпасть; сам манифест намеренно невалиден (нет компонентов)",
+      "manifest": {
+        "kind": "agent",
+        "system": "prototype",
+        "visibility": "tenant",
+        "audience": "personal",
+        "class": "S"
+      }
+    },
+    {
+      "name": "full-declaration",
+      "note": "все поля, включая значимые для omitempty: shared/compat/hooks/own_tables и непустые наборы полномочий",
+      "manifest": {
+        "kind": "agent",
+        "system": "prototype.a2a:v1",
+        "visibility": "tenant",
+        "audience": "shared",
+        "class": "C",
+        "components": [
+          {
+            "name": "agent",
+            "a2a": true,
+            "min_replicas": 1,
+            "max_replicas": 3
+          },
+          {
+            "name": "worker",
+            "a2a": false,
+            "min_replicas": 1,
+            "max_replicas": 2
+          }
+        ],
+        "state": {
+          "partition": "u-ahp-accept",
+          "shared": [
+            "ops",
+            "h24"
+          ],
+          "compat": "state-v1",
+          "drain": "7d",
+          "delete_hook": "hooks/delete",
+          "own_tables": true
+        },
+        "capabilities": {
+          "models": [
+            "qwen-max"
+          ],
+          "tools": [
+            "artifacts.save"
+          ],
+          "memory": [
+            "memory:read"
+          ],
+          "compute": [],
+          "calls": [
+            "agent:prototype.a2a:v1"
+          ],
+          "self_tasks": 2
+        },
+        "limits": {
+          "depth": 3,
+          "active_tasks": 5,
+          "task_timeout": "45s"
+        }
+      }
+    },
+    {
+      "name": "unknown-fields",
+      "note": "та же форма UI плюс незнакомые транспортному типу поля: они выпадают до хеширования",
+      "same_digest_as": "ui-default",
+      "manifest": {
+        "kind": "agent",
+        "system": "prototype.h24-demo-agent",
+        "visibility": "tenant",
+        "audience": "shared",
+        "class": "C",
+        "components": [
+          {
+            "name": "agent",
+            "a2a": true,
+            "min_replicas": 1,
+            "max_replicas": 1,
+            "unknown_image": "ghcr.io/x/y:latest"
+          }
+        ],
+        "state": {
+          "partition": "agent-h24-demo-agent",
+          "owner": "whoever"
+        },
+        "capabilities": {
+          "self_tasks": 0
+        },
+        "limits": {
+          "depth": 1,
+          "active_tasks": 1,
+          "task_timeout": "5m"
+        },
+        "x_client": "ai-factory",
+        "revision": 7
+      }
+    },
+    {
+      "name": "immutable-image",
+      "manifest": {
+        "kind": "agent",
+        "system": "prototype.h24-demo-agent",
+        "visibility": "tenant",
+        "audience": "shared",
+        "class": "C",
+        "components": [
+          {
+            "name": "agent",
+            "a2a": true,
+            "min_replicas": 1,
+            "max_replicas": 1,
+            "image": "registry.example.test/agent@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ],
+        "state": {
+          "partition": "agent-h24-demo-agent"
+        },
+        "capabilities": {
+          "self_tasks": 0
+        },
+        "limits": {
+          "depth": 1,
+          "active_tasks": 1,
+          "task_timeout": "5m"
+        }
+      },
+      "note": "Known Image field participates in digest; immutable image is accepted by Registry."
+    }
+  ],
+  "canonical_values": [
+    {
+      "name": "html-escaping",
+      "note": "encoding/json экранирует <,>,& в \\uXXXX — каноника идёт этими байтами",
+      "value": {
+        "a": "<b>&c"
+      }
+    },
+    {
+      "name": "key-order",
+      "note": "сортировка ключей по байтам UTF-8",
+      "value": {
+        "b": 1,
+        "a": {
+          "z": 1,
+          "a": [
+            1,
+            2,
+            3
+          ]
+        },
+        "0": "x"
+      }
+    },
+    {
+      "name": "unicode",
+      "note": "нелатиница: сортировка по UTF-8, а не по кодовым единицам UTF-16",
+      "value": {
+        "ключ": "значение",
+        "е": [
+          {
+            "к": ""
+          }
+        ],
+        "~t": [
+          true,
+          false,
+          null
+        ]
+      }
+    },
+    {
+      "name": "escapes",
+      "note": "управляющие символы, обратный слеш и U+2028/U+2029",
+      "value": {
+        "s": "a\"b\\c\nd e f"
+      }
+    }
+  ]
+}

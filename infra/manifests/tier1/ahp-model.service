@@ -1,0 +1,21 @@
+[Unit]
+Description=AHP model service
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/ahp --role model --listen 127.0.0.1:8083
+EnvironmentFile=/etc/ahp/model.env
+Restart=always
+RestartSec=3
+NotifyAccess=main
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ahp/model
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

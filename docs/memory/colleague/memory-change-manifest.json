@@ -1,0 +1,429 @@
+{
+  "source_commit": "7c810ec2aa5d0d650205807f6d0e12489fd0fe62",
+  "previous_source_commit": "5ada0af33527a34469a32c8f8a931cad90849f2e",
+  "purpose": "Hindsight integration diff against upstream checkpoint; excludes this manifest itself",
+  "upstream_revisions": {
+    "agent-runtime": "b8e8288dc6e36b84a709ad2bfa1a4b5d6882704e",
+    "agents-space": "f702057b9abc81904b583cae31e293a7cbf0c8d0",
+    "artifacts-service": "a0e1885c28990150755d34f61566f0b6b1d1fbbf",
+    "compute-service": "066be49d350cc1f16205dd134647d01d977da29e",
+    "deploy": "82576b2a9ac4b60f43070014b4f0fecd5e050a1d",
+    "evals-service": "cb081b7c3cdc87fba16fa8b045c2e5be28e96ffa",
+    "execution-service": "4299fd2896a05d57e5339380dd41a7aa175510c2",
+    "frontend": "2105e831c43542949ca100bc5da4e8f8381c7c7f",
+    "identity-service": "e667296e40e5b863c95bbec85178770dfaad6243",
+    "integration": "69ec6591d9e679b15080c797270cfd913d88c5cb",
+    "memory-service": "157998a43043bc20299787c8e7c14252781a9dc8",
+    "model-gateway": "c8c16dd370278f2baac2227de999462e12e8f31a",
+    "platform-runtime": "a82d8a443202692181d5d3ff1cd80b4dba5e7477",
+    "registry-service": "9caad4c61abb86ee9be1b041f1386693f74fb4d6",
+    "sdk": "c7a82b68f79964b81d8263ffe4f199cfffe5664b",
+    "shared-common": "30ac62164b68d9bd8647fd2b93e3657c10b9c753",
+    "state-service": "68459ea05ca374da0ed0f3d7898937e8a33ce102",
+    "tool-gateway": "678ffd25e584c6c11392e03289e521850b1350a6",
+    "triggers-service": "5432f9c51a8c93c5aa44bea3088ede1381731217",
+    "workspace-service": "b51cf2d2a6528f8d970e89547ddc735cf56e1363"
+  },
+  "files": [
+    {
+      "path": "agents-space/space/coordinator.go",
+      "upstream_sha256": "f5121fd8c0eabc696d4c6e98cfe102d4ce89dcdb6e74b59ed54be3e9c7022c73",
+      "current_sha256": "8c42bce2ac4292249b5db8953e50040f15cd4c72294841e4bf825127a7dd6234"
+    },
+    {
+      "path": "agents-space/space/project.go",
+      "upstream_sha256": null,
+      "current_sha256": "f4cd3540f25cd41e6a0a0f3addeb89cf3cc99e8bef02ea0404b0617d37db4380"
+    },
+    {
+      "path": "agents-space/space/project_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "1c2c727c0fa0d5da167555b4b23e116126ed66e67ab1936f343914bd16a95725"
+    },
+    {
+      "path": "agents-space/space/turn_history.go",
+      "upstream_sha256": "64893dcd82eb6089a6add6069d2a09b06880e244037d35d7331489dc411e8971",
+      "current_sha256": "2190cd5e3c90439b9f3f76e487c9235fc9ceeb570138bb4e7fd899c6ecaa0b1e"
+    },
+    {
+      "path": "agents-space/space/types.go",
+      "upstream_sha256": "3be8b353cef72d3fce6089fce677ca88e1bf4565f0cbaf10b1ad8efb14dca99c",
+      "current_sha256": "18b0020af98eb12f6d560d9a62b666c860b726ad0374ce66f6fbf9ce15272335"
+    },
+    {
+      "path": "agents-space/space/ui_planes.go",
+      "upstream_sha256": "9c1804fa26c0518a013c161d90eb268a8e0d95de8ee71cf9cd389b2409a946f1",
+      "current_sha256": "6cbf41cd3513f5120beb254385ad575fb74b26908a800c16c697009017bd85c5"
+    },
+    {
+      "path": "execution-service/core/memory.go",
+      "upstream_sha256": null,
+      "current_sha256": "6c04da74402251953e9e88dee97aef44c9e6390299774ac25dea5ecb4c0d03cf"
+    },
+    {
+      "path": "execution-service/core/memory_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "61cc742866fb9a417837170b806b05a59476573141e8f72f2d5baa800295e977"
+    },
+    {
+      "path": "execution-service/core/runtime.go",
+      "upstream_sha256": "c91106ec9ab5ae45bab3b7030cf0274b50f197ee0628901edbe8034bfa7cd915",
+      "current_sha256": "ae6199ffc8b9e91398dc87d6b1dde0ac214dfb733c5736fa3d3edf0c72adef54"
+    },
+    {
+      "path": "frontend/web/aifactory/ahp-live.js",
+      "upstream_sha256": "7426e231dcf1850b75a51ee45993afc926d29d9998fcf5aca190d0be953f9ace",
+      "current_sha256": "853540f513382bd8bd4d8671220d449f9410242a5a85ea250a3e6192420854f1"
+    },
+    {
+      "path": "frontend/web/aifactory/ahp-shapes.js",
+      "upstream_sha256": "79b0990699b91503c91ac95a215ebd61295f6113d9fac3e6c0714045edc882bf",
+      "current_sha256": "b37a202de7ffef2aafe867196b98e3ce0f37a65433a290ac10eba5be2c4721c3"
+    },
+    {
+      "path": "frontend/web/aifactory_memory.test.mjs",
+      "upstream_sha256": null,
+      "current_sha256": "1ec2e8bb93b1eafd073533f8b91256deebdf29ca8f426c433f78ff1ed7618369"
+    },
+    {
+      "path": "integration/.gitignore",
+      "upstream_sha256": "680434f39d9e322ee0029bb59f1e442df98018eff67447fff401ee82365a2325",
+      "current_sha256": "27b2e89ef1c84353ec1d1baf4433cd08796aae773fb4fb22a4bc954feb9b7609"
+    },
+    {
+      "path": "integration/MEMORY-UPDATE.md",
+      "upstream_sha256": null,
+      "current_sha256": "4e25c62cc65ced09ef1df4656ba2a15a0b4fe46a7bfb091c62b3ef472d26f8ac"
+    },
+    {
+      "path": "integration/MEMORY.md",
+      "upstream_sha256": null,
+      "current_sha256": "772408f4bb365be16496f2a51354524a2f916947390fa4bba1aabdba84a555e8"
+    },
+    {
+      "path": "integration/PUBLISH.md",
+      "upstream_sha256": null,
+      "current_sha256": "ebe44e0ce915ac1b49883f148ae79aa4532a30bf78a92a8faa544ac66a25d6d1"
+    },
+    {
+      "path": "integration/README.md",
+      "upstream_sha256": "6044b4fbd36cec91eaa207a86d2d104537da78ff24ca30a12de267b39bc2c1a4",
+      "current_sha256": "4e354245db0fc10040e7ea1f4fc963c1ccba783ee32602c86ef6ded8517e8d8c"
+    },
+    {
+      "path": "integration/compose.memory.yaml",
+      "upstream_sha256": null,
+      "current_sha256": "b6221b0d5419ab5daac75c32e11a58df56441cb28bb41126e693445773be4c11"
+    },
+    {
+      "path": "integration/handoff/hindsight-memory-architecture.md",
+      "upstream_sha256": null,
+      "current_sha256": "a5c2f57ce4d5598ed0ccd3b6ae8d6e0c873b1ea6eb110a78f201d73871c91140"
+    },
+    {
+      "path": "integration/handoff/initial-memory-integration-audit.md",
+      "upstream_sha256": null,
+      "current_sha256": "56abba7299b8bc38a63449ae0b148dac8dd1a37f277bbbe9b4265ca998d2f81b"
+    },
+    {
+      "path": "integration/handoff/memory-integration.md",
+      "upstream_sha256": "647dca8aa2387280b99ec68487f1a5db16b0acacdde59821e91840134356493d",
+      "current_sha256": "effce884f633095a3b989f5de8d116b5c8e6e42338ec818d7920c5d5b80c7b8f"
+    },
+    {
+      "path": "integration/handoff/readiness-matrix.md",
+      "upstream_sha256": "aea210f687a90a65643feceef426be1bdba821e1a2ceb4af9a11afd293609a52",
+      "current_sha256": "400d9c0ea546e7db02f28be43eb364f69c4ce9a752525d0687fc1a0617f53c59"
+    },
+    {
+      "path": "integration/memory-revisions.json",
+      "upstream_sha256": null,
+      "current_sha256": "705242e89e30712e88e0b0577796bddbfba1bd0e4186e273e5a6cd08275ac51e"
+    },
+    {
+      "path": "integration/memory.env.example",
+      "upstream_sha256": null,
+      "current_sha256": "343f6a227777111e9fca04e2dc02ed22efb0c6432476e46e673fcfecf2c8a2ff"
+    },
+    {
+      "path": "integration/scripts/download-memory-deps.sh",
+      "upstream_sha256": null,
+      "current_sha256": "c8f394e1263eb381300b706808535725630e828d157c8f13fd068b6305c67f99"
+    },
+    {
+      "path": "integration/scripts/fetch-repositories.sh",
+      "upstream_sha256": null,
+      "current_sha256": "c0cdcdd1550ae9b0aeec3690d54738d438644e96c3d3b2df56f557761f9aa4a6"
+    },
+    {
+      "path": "integration/scripts/push-memory-branches.sh",
+      "upstream_sha256": null,
+      "current_sha256": "bb1ded966d24331b9f9de46a1463c9e25ca8a65425adb3eb048f55eb7cbc9d5d"
+    },
+    {
+      "path": "integration/scripts/validate-memory-pg.sh",
+      "upstream_sha256": null,
+      "current_sha256": "1dad04a918df18d5398dc6a91e94efff4dd791145b418635c1a04d2249e149f9"
+    },
+    {
+      "path": "memory-service/README.md",
+      "upstream_sha256": "6a5ea8ea34e00d091e849d003fb60fe44fb2254b28fd5899bc44c2836a083de5",
+      "current_sha256": "1bc5807b5937912c6e5d46547507c93938404d7d6bd737da087823a2d961a747"
+    },
+    {
+      "path": "memory-service/VALIDATION.md",
+      "upstream_sha256": null,
+      "current_sha256": "ffde4d26e83be983a67a6ad0c551543cfe1e0d67820bc385de13deb057c0257d"
+    },
+    {
+      "path": "memory-service/ahpbridge/access.go",
+      "upstream_sha256": null,
+      "current_sha256": "fb173e5e7301b5b7fbde2251f7586d0e7e6906a31785a7397eccf305d5669e17"
+    },
+    {
+      "path": "memory-service/ahpbridge/access_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "19c9b4c69110ee2ad43dadf7ecb961ef3e5d4fde4a9841ce900023619bbe5e11"
+    },
+    {
+      "path": "memory-service/ahpbridge/completion.go",
+      "upstream_sha256": null,
+      "current_sha256": "76978419c5adb9cda0e7f7869a6d27291724469e7a8df72e4902e6a8a8e9b7e3"
+    },
+    {
+      "path": "memory-service/ahpbridge/completion_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "21b6633c3ce1c1aa6efd830bfdf38863dad482ba9045d2ce65030950bf631f0f"
+    },
+    {
+      "path": "memory-service/ahpbridge/handler.go",
+      "upstream_sha256": null,
+      "current_sha256": "2ccbacfda6c7a7fc1c515fb5b5f030e6644ba1bb2a4e7087aa0927433516f729"
+    },
+    {
+      "path": "memory-service/ahpbridge/handler_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "cf8840f0841942df1ddb1ebeecba7e908ac07bfad3a1fd8ce01a130c1d6df300"
+    },
+    {
+      "path": "memory-service/ahpbridge/rpc.go",
+      "upstream_sha256": null,
+      "current_sha256": "03a1d11eb53fa253a09e1dd6c1941d047bbe99a27b2917022b23257a86c1ab6b"
+    },
+    {
+      "path": "memory-service/ahpbridge/workspace.go",
+      "upstream_sha256": null,
+      "current_sha256": "f016e3143bbdad8876ff8f552a9651230f7483e69a913f0ae307b88b188c3098"
+    },
+    {
+      "path": "memory-service/hindsight/client.go",
+      "upstream_sha256": null,
+      "current_sha256": "38e641d4ab4d1f29115811862a22911eb673239e6750f7883182d99e1f7c51d9"
+    },
+    {
+      "path": "memory-service/hindsight/client_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "f3105c03df6d85980c64972474b4bcd437c8df45203ea32c732b8b2a48aa22c2"
+    },
+    {
+      "path": "memory-service/longterm/IMPORT.json",
+      "upstream_sha256": null,
+      "current_sha256": "18462e4ff51fca4d4c45b27eced51547844a4d4cc3aee83ea80d08bcaf662f35"
+    },
+    {
+      "path": "memory-service/longterm/binding.go",
+      "upstream_sha256": null,
+      "current_sha256": "d3523ec4a212882fbf3a394896daf547087ddedcab1f236b12369bc34d9a0f68"
+    },
+    {
+      "path": "memory-service/longterm/erase.go",
+      "upstream_sha256": null,
+      "current_sha256": "8e673b81195e25cfc71efa343aec50bacb746502f71108ec6dab2140e9155325"
+    },
+    {
+      "path": "memory-service/longterm/flush.go",
+      "upstream_sha256": null,
+      "current_sha256": "3c904022bb41b50174df20943d3d88cb71cb5047435e4b4c0de194fffd8baef3"
+    },
+    {
+      "path": "memory-service/longterm/httpapi/dev_access_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "38709cf811ca892498a5c57b0d83c78302841803a3816bf8395a77ec08344291"
+    },
+    {
+      "path": "memory-service/longterm/httpapi/server.go",
+      "upstream_sha256": null,
+      "current_sha256": "ede972c15087f1803e1375b1fc5bf2966f73bb653471772d94773b2fd444846d"
+    },
+    {
+      "path": "memory-service/longterm/httpapi/server_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "1d5e8970158eef31ecb44657ec1a5f19ba5eceefa06a8ddf1a5afb497c7e7e78"
+    },
+    {
+      "path": "memory-service/longterm/integration_policy_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "123fea627fadb46beb48d2887771ee903132f7a5e0d9db5db3b43aff520dc0f0"
+    },
+    {
+      "path": "memory-service/longterm/list.go",
+      "upstream_sha256": null,
+      "current_sha256": "ca90898233a98a609c1a21d57854eb4c885b11f9fdd242de18318d8041368a33"
+    },
+    {
+      "path": "memory-service/longterm/memstore.go",
+      "upstream_sha256": null,
+      "current_sha256": "c4397ad326a9828b096027df1974aa58146f81abefca57ba7188b84a44f446ff"
+    },
+    {
+      "path": "memory-service/longterm/missions.go",
+      "upstream_sha256": null,
+      "current_sha256": "2de93fe6383c2f4a32707259438dcdde2785ba7b5fb8f89a9a46a11479994fd4"
+    },
+    {
+      "path": "memory-service/longterm/pgstore/store.go",
+      "upstream_sha256": null,
+      "current_sha256": "88841346a33aa97b624d92241a2fb934297e3680f5fac7fcc21f963ba0e753c6"
+    },
+    {
+      "path": "memory-service/longterm/pgstore/store_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "14c6e16376ac863454a6ad09f4729488b44653eeb4c9dd5a850a698784c52740"
+    },
+    {
+      "path": "memory-service/longterm/pgstore/tenant.go",
+      "upstream_sha256": null,
+      "current_sha256": "6f090343e1d7190fff968672d368a89bfddfb499bd7de9b8658f76ff975028d8"
+    },
+    {
+      "path": "memory-service/longterm/pgstore/tenant_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "1cf11adcf6037f6f38a017c82ed976be437d839e1aa64eca1f5f57bf2f0d058e"
+    },
+    {
+      "path": "memory-service/longterm/sdk/client.go",
+      "upstream_sha256": null,
+      "current_sha256": "9cbffe5fd77d8acfd8821e16709596e8212f11e7cc05db7f86e9ad8da9faada4"
+    },
+    {
+      "path": "memory-service/longterm/sdk/tools.go",
+      "upstream_sha256": null,
+      "current_sha256": "5883b9d5f7b852cf6fce42f8fb5f1f1d5022a00c3f6884bcf269e0c3142cf63f"
+    },
+    {
+      "path": "memory-service/longterm/sdk/tools_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "8e37364d9d088fea8890f73562802fd8e52a898149ed5d264bed79dab8ffc657"
+    },
+    {
+      "path": "memory-service/longterm/service.go",
+      "upstream_sha256": null,
+      "current_sha256": "bf509a5412d77256584a0a09a90db13d941c5959c8335e1dcb303527da22d10a"
+    },
+    {
+      "path": "memory-service/longterm/service_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "31bb5daf8b82bb23ada57fb42b513cb54f4bde2cb67dc02912acdcddc98c705f"
+    },
+    {
+      "path": "memory-service/longterm/source_floor.go",
+      "upstream_sha256": null,
+      "current_sha256": "102f3a5d5ed82ec7456082cbcf12220bb79ac176a3806569d6cbcf191dafc3f4"
+    },
+    {
+      "path": "memory-service/longterm/status.go",
+      "upstream_sha256": null,
+      "current_sha256": "7179ea138a59f9fda07180f021e7549c14e2486402f31fb87bb971c8c2efcd34"
+    },
+    {
+      "path": "memory-service/longterm/tenant.go",
+      "upstream_sha256": null,
+      "current_sha256": "dcb3833ebec8f2f4cffd152b3874f5293ee40a6f63cdf4866a18ae621de39641"
+    },
+    {
+      "path": "memory-service/longterm/tenant_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "d2be7b86550ab018b860f2582778b1bb8eedded4ec3bdb36e8b327ec450fad38"
+    },
+    {
+      "path": "memory-service/longterm/types.go",
+      "upstream_sha256": null,
+      "current_sha256": "748b576807f9ee0e1604a40df3be9d68873c4f3a3f7bd8fea140f9c2d7dbbfca"
+    },
+    {
+      "path": "memory-service/longterm/worker.go",
+      "upstream_sha256": null,
+      "current_sha256": "a0c08854f58b029abe3d126677469d834bdeb43911dbfc2b571bfd0091114ee0"
+    },
+    {
+      "path": "platform-runtime/cmd/ahp/hindsight_owner_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "49458cc7636ceb0027b0ac96a797c24e1d1b77bf03f0a027d0fc7d446554918a"
+    },
+    {
+      "path": "platform-runtime/cmd/ahp/hindsight_sources.go",
+      "upstream_sha256": null,
+      "current_sha256": "c57ee36aa3c2289733231be5894d1726750072614b801543a0e80e8542aa8c46"
+    },
+    {
+      "path": "platform-runtime/cmd/ahp/main.go",
+      "upstream_sha256": "9e090d76996d19deaa8f56982a7e23ffaeab132056f7bab47965af71ae772dd6",
+      "current_sha256": "d4deed1c1de59ace6e28f25816343ae85634d7f09c511bf39c2fcd79e641b221"
+    },
+    {
+      "path": "platform-runtime/cmd/ahp/memory_identity.go",
+      "upstream_sha256": null,
+      "current_sha256": "8cdbe76fe63f8c3f3e1c26b8b3e2f85b870dddfeca89c5b69d4d2651a163b2ed"
+    },
+    {
+      "path": "platform-runtime/cmd/ahp/mount_hindsight.go",
+      "upstream_sha256": null,
+      "current_sha256": "b40903f5d8fca5164805b914f19d06ffb51bfdff6754a5ba966677dfe7fb70f7"
+    },
+    {
+      "path": "platform-runtime/cmd/ahp/mount_memory.go",
+      "upstream_sha256": "de0d8aa2bc88a84beeda468a168a47baedba70912cc5f710371b87470b1a6a32",
+      "current_sha256": "d45a4edd2c40262dfe1f4b1a11fb1a35a3ab3fd80653743c40035fc665974f75"
+    },
+    {
+      "path": "platform-runtime/cmd/ahp/mount_memory_test.go",
+      "upstream_sha256": "118920261cb98c13f430fc9ab1c9982a1f575b84e851a1d26025439d11cdb42b",
+      "current_sha256": "67c07d460a1c215b1e4d215297b80449a0c0c33dbadb6abaa6a8a86f4c361ce0"
+    },
+    {
+      "path": "platform-runtime/cmd/ahp/state_completion.go",
+      "upstream_sha256": null,
+      "current_sha256": "c4d3b87e737e2a7360a50a9981ef9bce69b0bdf934b4d8224053544ef898b19b"
+    },
+    {
+      "path": "platform-runtime/cmd/as-runner/main.go",
+      "upstream_sha256": "54cefcdcc14d15e2a98843b9e34a1b2ecd8cb2b4ea74ad7a7a2528075107d2f3",
+      "current_sha256": "c612a257f8fcb3480813228b5905a453997b4f5487b8a093ba138f75e3737c82"
+    },
+    {
+      "path": "platform-runtime/cmd/as-runner/memory.go",
+      "upstream_sha256": null,
+      "current_sha256": "c21fe93f228b602d7b2458c4ef6f3b3a633ab68f820eea0a11f612f0a6b23bcb"
+    },
+    {
+      "path": "state-service/state/completion.go",
+      "upstream_sha256": null,
+      "current_sha256": "7769eb1ed5e674a916d1af84598d3a7984150930615e42f5d419c935d5a1a9da"
+    },
+    {
+      "path": "state-service/state/completion_test.go",
+      "upstream_sha256": null,
+      "current_sha256": "524cd7e36ba2171c35a7f84a4f8cef6e7aaf59fa232080b74ab57b99a3867d58"
+    },
+    {
+      "path": "state-service/state/evidence.go",
+      "upstream_sha256": null,
+      "current_sha256": "424ed62d91aed7ed0e853c5ac8ed982b66ade01cebc48dbdaf2415f120afaa8e"
+    },
+    {
+      "path": "state-service/state/store.go",
+      "upstream_sha256": "2177b8eb8c698afeba6b01f395a5f103ad4cab5b8e9db17d9cae7fc7474905e8",
+      "current_sha256": "32117b1a2a7ad3be830d5cec8c3d513d57be497556b11d8fad8be05ac1be2428"
+    }
+  ]
+}

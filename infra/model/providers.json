@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "providers": [
+    {
+      "name": "modelrun",
+      "class": "standard",
+      "audience": { "kind": "external", "allow_external": false },
+      "secret_ref": "ahp-hive/execution/qwen",
+      "models": ["qwen-38-27b-fp8"],
+      "quota": { "rpm": 20, "tpm": 120000, "window_seconds": 60 }
+    },
+    {
+      "name": "modelrun-in-tenant",
+      "class": "restricted",
+      "audience": { "kind": "tenant" },
+      "secret_ref": "ahp-hive/execution/qwen",
+      "models": ["qwen-38-27b-fp8"],
+      "quota": { "rpm": 10, "tpm": 60000, "window_seconds": 60 }
+    }
+  ],
+  "routes": [
+    {
+      "name": "class-restricted-to-in-tenant",
+      "when": { "classes": ["restricted"] },
+      "then": { "provider": "modelrun-in-tenant" }
+    },
+    {
+      "name": "default",
+      "when": { "tenants": ["*"] },
+      "then": { "provider": "modelrun" }
+    }
+  ]
+}

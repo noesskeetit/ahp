@@ -1,0 +1,91 @@
+# Tier 0 · Shared SaaS — PDF §10 "Уровни поставки".
+# Boundary: ВСЁ работает в облаке Cloud.ru в ОБЩЕМ пуле; граница с контуром
+# заказчика сдвинута максимально в облако (в контуре заказчика — только вход
+# через VPC relay к корпоративным API). Изоляция tenant — ЛОГИЧЕСКАЯ (RLS по
+# tenant_id) + КРИПТОГРАФИЧЕСКАЯ (KMS-ключ на tenant). Тот же бинарь cmd/ahp,
+# тот же контракт сервисов, что и на Tier 1/2A/2B.
+#
+# EVIDENCE: этот манифест доказывает толькоwell-formed YAML + выражение RLS/KMS
+# в конфигурации (L2_local_test). Он НЕ доказывает живой shared-pool деплой под
+# нагрузкой с проверенной tenant-изоляцией — это требует L4 target runtime.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ahp-shared-pool
+  namespace: ahp-shared
+  labels:
+    app.kubernetes.io/name: ahp
+    app.kubernetes.io/tier: "0"
+    ahp.platform/tenant-isolation: "logical-rls"
+spec:
+  # Shared pool: один парк реплик обслуживает все tenants; масштаб — реплики,
+  # НЕ отдельный деплой на tenant (в отличие от Tier 1).
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ahp
+      app.kubernetes.io/tier: "0"
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ahp
+        app.kubernetes.io/tier: "0"
+    spec:
+      serviceAccountName: ahp-shared
+      containers:
+        - name: ahp
+          # Единый бинарь; --role all поднимает все сервисные роли в одном
+          # процессе (shared pool). Контракт State API идентичен Tier 1/2A/2B.
+          image: ahp-platform/ahp:sha-8b14a59  # pin source commit sha (reproducible); build pipeline rewrites to exact build sha
+          args: ["--role", "all", "--listen", ":8080"]
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: ahp-rls-kms
+            - secretRef:
+                name: ahp-shared-env
+          env:
+            # RLS включается на уровне приложения/БД: каждый запрос несёт
+            # tenant_id, политика PostgreSQL ограничивает строки по нему.
+            - name: AHP_RLS_MODE
+              value: "tenant"
+            # KMS-ключи per-tenant: ссылка на шаблон ключа, не сам ключ.
+            - name: AHP_KMS_KEYREF_TEMPLATE
+              value: "ahp/tenants/{tenant_id}/master"
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ahp-shared
+  namespace: ahp-shared
+spec:
+  selector:
+    app.kubernetes.io/name: ahp
+    app.kubernetes.io/tier: "0"
+  ports:
+    - port: 443
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ahp-shared
+  namespace: ahp-shared

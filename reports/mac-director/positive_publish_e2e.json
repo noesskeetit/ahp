@@ -1,0 +1,31 @@
+{
+  "lane": "registry-kms",
+  "owner": "registry-supplychain",
+  "generated_utc": "2026-11-09T16:23:30Z",
+  "candidate_base": "b5e054b9efd610f33d241ab47adcea02c5bf897e",
+  "lane_head": "cebf9b29",
+  "stand": "isolated PostgreSQL via run-tests.py (native + linux), real plane code",
+  "test_files": [
+    "internal/registry/supplychain_publish_e2e_test.go"
+  ],
+  "cases": [
+    {"id": "positive_publish_e2e", "desc": "operator RunEval (AHP_EVAL_SUITES_FILE, strict loader) against controlled A2A target -> fresh pass -> same image publishes (PutVersion) 200", "result": "PASS", "evidence": "private/pdf-closure-20261102/evidence/registry-kms-20261109T162250Z-7587b7.log"},
+    {"id": "gate_A_no_verdict", "desc": "publish before any verdict -> 409", "result": "PASS", "evidence": "private/pdf-closure-20261102/evidence/registry-kms-20261109T162250Z-7587b7.log"},
+    {"id": "gate_B_valid_verdict", "desc": "publish after fresh pass -> 200", "result": "PASS", "evidence": "private/pdf-closure-20261102/evidence/registry-kms-20261109T162250Z-7587b7.log"},
+    {"id": "gate_Aprime_revoked", "desc": "publish after a later FAIL supersedes the pass -> 409 (A/B/A closed)", "result": "PASS", "evidence": "private/pdf-closure-20261102/evidence/registry-kms-20261109T162250Z-7587b7.log"},
+    {"id": "negative_mismatch_by_digest", "desc": "a pass for one digest never clears another (never-evaluated digest -> 409)", "result": "PASS", "evidence": "private/pdf-closure-20261102/evidence/registry-kms-20261109T162250Z-7587b7.log"},
+    {"id": "positive_stage_deploy_ib", "desc": "fresh pass eval + fresh SYNTHETIC security clearance -> stage install of same image passes", "result": "PASS", "evidence": "private/pdf-closure-20261102/evidence/registry-kms-20261109T162250Z-7587b7.log"},
+    {"id": "negative_stage_deploy_ib_stale", "desc": "security clearance superseded by FAIL -> new stage install blocked", "result": "PASS", "evidence": "private/pdf-closure-20261102/evidence/registry-kms-20261109T162250Z-7587b7.log"},
+    {"id": "full_registry_evals_regression_native", "result": "PASS", "evidence": "private/pdf-closure-20261102/evidence/registry-kms-20261109T162255Z-3a5de4.log"},
+    {"id": "full_registry_evals_regression_linux", "result": "PASS", "evidence": "private/pdf-closure-20261102/evidence/registry-kms-20261109T162306Z-06443c.log"}
+  ],
+  "boundaries_marked_synthetic": [
+    "A2A eval target is a loopback FIXTURE double speaking the real SendMessage/readyz wire, not a production container (live-graded container pending after the flap).",
+    "Eval target credential is a fixture issuer (double requires a bearer so issuance is still exercised); the value is not a platform task grant.",
+    "The stage-deploy security clearance is a synthetic signed RecordSecurityVerdict standing in for the ИБ service; admission/digest binding and the deploy gate are production code."
+  ],
+  "not_claimed": [
+    "No live OCI registry push/pull, no Kubernetes rollout, no external cosign/Sigstore, no external cloud KMS.",
+    "Authz of the publish/eval routes uses a permissive authorize here to isolate the gate logic; real IAM is covered by dedicated tests (attachRegistryManagement / admin authority)."
+  ]
+}

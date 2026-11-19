@@ -1,0 +1,6 @@
+# Pinned to the version verified end-to-end against the AHP State SDK for this
+# block. The State protocol itself is stdlib-only; these pins are required only
+# for the LangGraph adapters (AHPCheckpointSaver / AHPStore).
+langgraph-checkpoint==2.1.2
+langchain-core==0.3.86
+ormsgpack>=1.0.0

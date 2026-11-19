@@ -1,0 +1,13 @@
+{
+  "kind": "agent",
+  "system": "hr-assistant",
+  "visibility": "catalog",
+  "audience": "shared",
+  "components": [
+    {"name": "entry", "a2a": true},
+    {"name": "worker", "replicas": {"min": 0, "max": 20}}
+  ],
+  "state": {"partition": "subject", "shared": ["policy_cache"], "compat": "forward", "drain": "7d", "own_tables": true, "delete_hook": "/ahp/delete-subject"},
+  "capabilities": {"models": ["default-chat"], "tools": ["hr-api.read", "hr-api.write"], "memory": ["agent"], "compute": ["ephemeral"], "calls": ["hr-reader"], "self_tasks": {"max_fanout": 8}},
+  "limits": {"depth": 3, "task_timeout": "2h", "active_tasks": 200}
+}

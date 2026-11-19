@@ -1,0 +1,87 @@
+{
+  "source_checkpoint": "7c810ec2aa5d0d650205807f6d0e12489fd0fe62",
+  "integration_branch": "feature/hindsight-memory",
+  "repositories": {
+    "agent-runtime": {
+      "branch": "main",
+      "commit": "b8e8288dc6e36b84a709ad2bfa1a4b5d6882704e"
+    },
+    "agents-space": {
+      "branch": "feature/hindsight-memory",
+      "commit": "75746c3a558c279cd20511fb66a836de3e446ae8"
+    },
+    "artifacts-service": {
+      "branch": "main",
+      "commit": "a0e1885c28990150755d34f61566f0b6b1d1fbbf"
+    },
+    "compute-service": {
+      "branch": "main",
+      "commit": "066be49d350cc1f16205dd134647d01d977da29e"
+    },
+    "deploy": {
+      "branch": "main",
+      "commit": "82576b2a9ac4b60f43070014b4f0fecd5e050a1d"
+    },
+    "evals-service": {
+      "branch": "main",
+      "commit": "cb081b7c3cdc87fba16fa8b045c2e5be28e96ffa"
+    },
+    "execution-service": {
+      "branch": "feature/hindsight-memory",
+      "commit": "3b9a46636a41546b1c6a330002fb569611c387ef"
+    },
+    "frontend": {
+      "branch": "feature/hindsight-memory",
+      "commit": "c0d9b7b0359ff1cb2aa7c21f49af0ee1eec053a8"
+    },
+    "identity-service": {
+      "branch": "main",
+      "commit": "e667296e40e5b863c95bbec85178770dfaad6243"
+    },
+    "integration": {
+      "branch": "feature/hindsight-memory",
+      "commit": null,
+      "note": "Use the integration commit containing this manifest"
+    },
+    "memory-service": {
+      "branch": "feature/hindsight-memory",
+      "commit": "e07c91e3b7c2e1ee4621c4410b0d7eada7f6127c"
+    },
+    "model-gateway": {
+      "branch": "main",
+      "commit": "c8c16dd370278f2baac2227de999462e12e8f31a"
+    },
+    "platform-runtime": {
+      "branch": "feature/hindsight-memory",
+      "commit": "c42b66b4c3226f549a33ea5e6875ea977f0dedc2"
+    },
+    "registry-service": {
+      "branch": "main",
+      "commit": "9caad4c61abb86ee9be1b041f1386693f74fb4d6"
+    },
+    "sdk": {
+      "branch": "main",
+      "commit": "c7a82b68f79964b81d8263ffe4f199cfffe5664b"
+    },
+    "shared-common": {
+      "branch": "main",
+      "commit": "30ac62164b68d9bd8647fd2b93e3657c10b9c753"
+    },
+    "state-service": {
+      "branch": "feature/hindsight-memory",
+      "commit": "97082db267be647dfb7269e7934541a3a117ea43"
+    },
+    "tool-gateway": {
+      "branch": "main",
+      "commit": "678ffd25e584c6c11392e03289e521850b1350a6"
+    },
+    "triggers-service": {
+      "branch": "main",
+      "commit": "5432f9c51a8c93c5aa44bea3088ede1381731217"
+    },
+    "workspace-service": {
+      "branch": "main",
+      "commit": "b51cf2d2a6528f8d970e89547ddc735cf56e1363"
+    }
+  }
+}

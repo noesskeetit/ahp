@@ -1,0 +1,33 @@
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: ahp-handbook-poc
+servers: 1
+agents: 0
+image: rancher/k3s:v1.34.12-k3s1
+kubeAPI:
+  host: 127.0.0.1
+  hostIP: 127.0.0.1
+  hostPort: '30243'
+ports:
+  - port: 127.0.0.1:30222:30222
+    nodeFilters: [server:0]
+  - port: 127.0.0.1:30317:30317
+    nodeFilters: [server:0]
+options:
+  k3d:
+    wait: true
+    timeout: 180s
+  kubeconfig:
+    updateDefaultKubeconfig: false
+    switchCurrentContext: false
+  k3s:
+    extraArgs:
+      - arg: --disable=traefik,servicelb,metrics-server
+        nodeFilters: [server:0]
+  runtime:
+    labels:
+      - label: com.docker.compose.project=ahp-handbook
+        nodeFilters: ['*']
+  nodes:
+    serversMemory: 3g

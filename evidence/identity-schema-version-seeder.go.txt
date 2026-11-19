@@ -1,0 +1,114 @@
+package main
+
+// zzschemav8seed drives one database through the identity migrator of WHATEVER
+// tree it is compiled from, so the same program can (a) create a real existing
+// installation with the code that stamped version 7 and (b) assert what a later
+// migrator owes that installation. No mocks: every statement below is the
+// product's own Migrate, and the append is the product's own AddLabels.
+//
+//	seed  - migrate and report; this is the live installation as it stands
+//	after - report, migrate, report, then widen a context journal and report
+//
+// Reads AHP_TEST_DATABASE_URL. Prints identifiers only.
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ahp-platform/ahp/internal/identity"
+	"github.com/ahp-platform/ahp/pkg/contracts"
+	"github.com/ahp-platform/ahp/pkg/labels"
+)
+
+func main() {
+	mode := "after"
+	if len(os.Args) > 1 {
+		mode = os.Args[1]
+	}
+	dsn := os.Getenv("AHP_TEST_DATABASE_URL")
+	if dsn == "" {
+		fmt.Println("AHP_TEST_DATABASE_URL not set")
+		os.Exit(2)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		fmt.Println("pool:", err)
+		os.Exit(2)
+	}
+	defer pool.Close()
+	report := func(label string) (int64, bool, int) {
+		var version int64
+		if err := pool.QueryRow(ctx, `select coalesce(max(version), -1) from ahp_identity.schema_version where component='ddl'`).Scan(&version); err != nil {
+			fmt.Println(label, "version read failed:", err)
+			os.Exit(1)
+		}
+		var table bool
+		if err := pool.QueryRow(ctx, `select to_regclass('ahp_identity.context_label_events') is not null`).Scan(&table); err != nil {
+			fmt.Println(label, "table read failed:", err)
+			os.Exit(1)
+		}
+		var triggers int
+		if err := pool.QueryRow(ctx, `select count(*) from pg_trigger t join pg_class c on c.oid=t.tgrelid
+		  where c.relname='context_label_events' and t.tgname='context_label_events_append_only' and not t.tgisinternal`).Scan(&triggers); err != nil {
+			fmt.Println(label, "trigger read failed:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("%s ddl_version=%d context_label_events_present=%v append_only_trigger_count=%d\n", label, version, table, triggers)
+		return version, table, triggers
+	}
+	ids := identity.New(pool)
+	if mode == "seed" {
+		if err := ids.Migrate(ctx); err != nil {
+			fmt.Println("seed Migrate:", err)
+			os.Exit(1)
+		}
+		report("SEEDED")
+		return
+	}
+	before, _, _ := report("BEFORE")
+	if err := ids.Migrate(ctx); err != nil {
+		fmt.Println("Migrate:", err)
+		os.Exit(1)
+	}
+	_, table, triggers := report("AFTER")
+	if err := ids.Migrate(ctx); err != nil {
+		fmt.Println("repeat Migrate:", err)
+		os.Exit(1)
+	}
+	_, table2, triggers2 := report("AFTER_REPEAT")
+
+	// The obligation that broke: widening a context journal appends to the
+	// journal table. On an installation the migrator never updated this is 42P01.
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	scope := contracts.Scope{Tenant: "schemav8-" + suffix, Deployment: "dep-" + suffix, Subject: "subj-" + suffix}
+	if _, err := ids.CreateRoot(ctx, scope, identity.RootRequest{
+		Task: "task-" + suffix, Context: "ctx-" + suffix, Deployment: scope.Deployment,
+		Capabilities: []string{"state"}, TTL: 10 * time.Minute,
+	}); err != nil {
+		fmt.Println("CreateRoot:", err)
+		os.Exit(1)
+	}
+	if _, err := ids.AddLabels(ctx, scope, "task-"+suffix, labels.Set{Subjects: []string{"widened"}}); err != nil {
+		fmt.Printf("APPEND failed: %v\n", err)
+	} else {
+		var events int
+		if err := pool.QueryRow(ctx, `select count(*) from ahp_identity.context_label_events`).Scan(&events); err != nil {
+			fmt.Println("journal read failed:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("APPEND ok journal_rows=%d\n", events)
+	}
+	report("FINAL")
+	if !table || triggers == 0 || !table2 || triggers2 == 0 {
+		fmt.Println("VERDICT REFUSE: the migrator did not reconcile the existing installation")
+		os.Exit(1)
+	}
+	fmt.Println("VERDICT ACCEPT")
+	_ = before
+}

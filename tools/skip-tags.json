@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "owner": "Volta owns the FORM of a skip token and this registry; the verdict colour comes from the class, and a class is not author-assignable",
+  "measured_alphabet_command": "for r in $(git for-each-ref --sort=-committerdate --format='%(refname:short)' | head -40); do git diff --no-color <integration-HEAD>..$r -- '*.go'; done | grep -ho 'SKIP_[A-Z]*\\[tag=[a-z0-9_]*\\]' | sort -u",
+  "closed_classes": [
+    "real_store_env",
+    "database_env",
+    "trusted_parser_env",
+    "harness_toolchain_env",
+    "harness_precondition_env",
+    "opt_in_only"
+  ],
+  "class_meaning": {
+    "real_store_env": "an object store was not supplied; red at a full environment",
+    "database_env": "a database was not supplied; red at a full environment",
+    "trusted_parser_env": "the trusted artifact parser is not available; red at a full environment",
+    "harness_toolchain_env": "a harness interpreter or tool is absent; red at a full environment",
+    "harness_precondition_env": "the leg cannot be attempted for a harness reason (missing checkout object, evidence path, git metadata); red at a full environment",
+    "opt_in_only": "nobody turned a switch on: that is a CHOICE, so the token must be SKIP_EXPLICIT, never SKIP_ENV"
+  },
+  "tags": {
+    "artifact_plane": {
+      "class": "real_store_env",
+      "status": "canonical",
+      "emitted_by": ["internal/model/artifact_plane_gate_test.go", "internal/execbridge/tool_wire_test.go"],
+      "note": "the object-store dependency; permission to write it is declared per lane via AHP_TEST_OBJECT_STORE, not inherited from the environment"
+    },
+    "artifact_parser": {
+      "class": "trusted_parser_env",
+      "status": "canonical",
+      "emitted_by": ["internal/executor/realdeps_test.go"]
+    },
+    "postgres": {
+      "class": "database_env",
+      "status": "canonical",
+      "note": "forward name for the database dependency: a tag names the dependency, not the lane and not a bundle of dependencies"
+    },
+    "database": {
+      "class": "database_env",
+      "status": "transition",
+      "superseded_by": "postgres",
+      "emitted_by": ["internal/execbridge/bridge_db_test.go"],
+      "note": "COND-5: emitted on heisenberg/volta-conditions-on-34aed0fe; registered so the mechanism does not refuse a real measurement during the rename, and scheduled for rename by the owning lane"
+    },
+    "real_deps": {
+      "class": "real_store_env",
+      "status": "deprecated",
+      "superseded_by": "the per-dependency tag (artifact_plane, postgres, artifact_parser)",
+      "emitted_by": ["internal/executor/realdeps_test.go", "internal/execbridge/bridge_db_test.go (heisenberg/execbridge-skip-tokens)"],
+      "note": "an umbrella over several dependencies: it cannot be counted, because one token does not say what was not covered. Frozen as-is, no new emissions under this name"
+    },
+    "dot_e2e_python": {
+      "class": "harness_toolchain_env",
+      "status": "canonical",
+      "emitted_by": ["tests/dote2e (root-pdf-closure-sdk-terminal-framefree)"]
+    },
+    "dot_e2e_layout": {
+      "class": "harness_precondition_env",
+      "status": "canonical",
+      "emitted_by": ["tests/dote2e (root-pdf-closure-sdk-terminal-framefree)"]
+    },
+    "source_revision": {
+      "class": "harness_precondition_env",
+      "status": "canonical",
+      "emitted_by": ["tests/dote2e (root-pdf-closure-sdk-terminal-framefree)"],
+      "note": "the candidate revision is not in this checkout; a real precondition, stated rather than guessed"
+    },
+    "dot_e2e_optin": {
+      "class": "opt_in_only",
+      "status": "transition",
+      "superseded_by": "SKIP_EXPLICIT with this tag",
+      "emitted_by": ["tests/dote2e (root-pdf-closure-sdk-terminal-framefree)"],
+      "note": "form correction requested: reason=leg_opt_in_only means nobody opted in. That is a choice, and SKIP_ENV is reserved for 'nobody supplied the dependency'. While registered it counts as yellow (never green), which is the safe colour either way"
+    },
+    "dot_e2e_llm": {
+      "class": "harness_precondition_env",
+      "status": "canonical",
+      "emitted_by": ["tests/dote2e/harness_test.go (root-pdf-closure-sdk-terminal-framefree)"],
+      "note": "the live personal-Dot leg cannot be attempted without AHP_LLM_MODEL. Registered by the dictionary owner BEFORE the lane that emits it, because an unregistered tag is UNKNOWN_SKIP_TAG and that red belongs to the mechanism, not to the honest leg. The class was fixed by the director when dispatching this lane: at an acceptance environment the model IS required to be supplied, so a skip here must read red, which is what harness_precondition_env means. The class name does not itself colour anything -- scripts/skip-verdict.mjs colours on the KIND (SKIP_ENV_AT_FULL_ENV fires for any skip_env row once the run declares a complete environment), measured at 9916e0b8"
+    },
+    "secret_store_dir": {
+      "class": "harness_precondition_env",
+      "status": "canonical",
+      "emitted_by": ["tests/dote2e/secret_hygiene_test.go (root-pdf-closure-sdk-terminal-framefree)"],
+      "note": "the sweep over real credential stores has no subject until the operator supplies AHP_SECRET_STORE_DIR; the leg says SKIP_ENV out loud and never PASS. Same class and the same reasoning as dot_e2e_llm: a subject the operator must supply, absent => not-covered => red at a full environment"
+    },
+    "git_worktree": {
+      "class": "harness_precondition_env",
+      "status": "canonical",
+      "emitted_by": ["tests/hygiene"],
+      "note": "git metadata is not mounted (a read-only source mount inside a test image): the leg skips visibly instead of passing vacuously"
+    }
+  }
+}

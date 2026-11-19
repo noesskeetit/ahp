@@ -1,0 +1,203 @@
+{
+  "task": "delivery",
+  "status": "ready_for_director_review",
+  "commit": "1744c143c6009bc5f9a9e127c5c4498abe85629a",
+  "tree": "226d28e9dba16019f1c69a6dc8013a2cee4c4c9e",
+  "base": "8b14a59",
+  "ranAt": "2026-10-30T07:32:00.616Z",
+  "isolation": {
+    "db": "ahp_hive_delivery",
+    "minio": "http://127.0.0.1:29000"
+  },
+  "summary": {
+    "run": 11,
+    "cited": 5,
+    "gated": 1
+  },
+  "items": [
+    {
+      "id": "G0-native-qwen-classifier",
+      "status": "run:pass",
+      "kind": "run",
+      "cmd": "bash $AHP_NATIVE_QWEN_ASSERT --selftest",
+      "rc": 0,
+      "verdict": {
+        "pass": "17",
+        "fail": "0"
+      },
+      "note": "classifier regression only; runtime gate wired as G0-before-bin in scripts/prototype-rebuild-deploy.sh"
+    },
+    {
+      "id": "build-offline-surface",
+      "status": "run:pass",
+      "kind": "run",
+      "cmd": "go build -tags 'ahp_exec ahp_data' ./cmd/ahp ./pkg/... ./internal/...",
+      "rc": 0,
+      "tail": "rc=0"
+    },
+    {
+      "id": "demo-serve-selftest",
+      "status": "run:pass",
+      "kind": "run",
+      "cmd": "npm run demo:selftest",
+      "rc": 0,
+      "verdict": {
+        "planes": "readiness=MOUNTED identity=MOUNTED state=MOUNTED data(artifacts)=MOUNTED execution(a2a)=MOUNTED",
+        "create-run->PG": "PERSISTED run=20261030T031050.533832000Z_sm2ip77wee2vabvehbg5msez4a",
+        "emil-hop": "green task=9c60c238-636f-4f81-b5c5-760d7383135b",
+        "DEMO_UI": "green"
+      }
+    },
+    {
+      "id": "model-artifact-pg",
+      "status": "run:pass",
+      "kind": "run",
+      "cmd": "npm run demo:selftest -- model",
+      "rc": 0,
+      "verdict": {
+        "model->artifact->PG": "passed=12 failed=0",
+        "DEMO_UI": "green"
+      }
+    },
+    {
+      "id": "live-journey-whole",
+      "status": "run:pass",
+      "kind": "run",
+      "cmd": "npm run journey:live",
+      "rc": 0,
+      "verdict": {
+        "LIVE_EMIL_TASK": "19257d15-c955-4950-8122-96ad932e325b",
+        "LIVE_EMIL_TOOL_CALLS": "1 LIVE_EMIL_MODEL_TURNS=2",
+        "LIVE_EMIL_MODEL_TURNS": "2",
+        "LIVE_PUT_SHA256": "69ebcfebe9c8bd82eb4adc35940553832136a364720c9c8c2e55790eca9a091f",
+        "LIVE_GET_SHA256": "69ebcfebe9c8bd82eb4adc35940553832136a364720c9c8c2e55790eca9a091f",
+        "LIVE_PG_RUN": "20261030T031119.425551000Z_6tielenkwigfkk4adb3aesf3xm",
+        "LIVE_JOURNEY": "GREEN"
+      },
+      "note": "REAL Qwen->Emil-core:18000 core_skill_activate->REAL MinIO sha256 PUT==GET->REAL PG; fail-closed on any missing dep"
+    },
+    {
+      "id": "separated-roles",
+      "status": "run:pass",
+      "kind": "run",
+      "cmd": "npm run test:e2e separated-roles",
+      "rc": 0,
+      "tail": "Separated roles (state/identity/model) boot independently and emit per-role OTel spans. | [run-tests] e2e: 1 passed, 0 failed"
+    },
+    {
+      "id": "otel-live-trace",
+      "status": "run:pass",
+      "kind": "run",
+      "cmd": "npm run test:e2e otel-trace",
+      "rc": 0,
+      "tail": "[otel-trace] 9 passed, 0 failed | [run-tests] e2e: 1 passed, 0 failed"
+    },
+    {
+      "id": "tier-static-verify",
+      "status": "run:pass",
+      "kind": "run",
+      "cmd": "bash scripts/verify-tier-target.sh",
+      "rc": 0,
+      "tail": "{\"static\": {\"tier0\": {\"kinds\": [\"ConfigMap\", \"Deployment\", \"Service\", \"ServiceAccount\"], \"objects\": 4}, \"tier1\": {\"unit_files\": 3}, \"tier2a\": {\"kinds\": [\"Deployment\", \"Namespace\", \"Service\", \"ServiceAccount\"], \"objects\": 10}, \"tier2b\": {\"kinds\": [\"HorizontalPodAutoscaler\", \"NetworkPolicy\", \"PodDisruptionBudget\", \"Role\", \"RoleBinding\"], \"objects\": 13}}} | {\"server_dry_run\":\"not-requested\",\"l4\":\"pending\"} | RESULT: static_rc=0  (L4 target-runtime: PENDING/external unless captured on a real cluster)"
+    },
+    {
+      "id": "chaos",
+      "status": "run:pass",
+      "kind": "run",
+      "cmd": "npm run test:chaos",
+      "rc": 0,
+      "tail": "[unknown-outcome] 13 passed, 0 failed | chaos/unknown-outcome: PASSED | [run-tests] chaos: 8 passed, 0 failed"
+    },
+    {
+      "id": "load",
+      "status": "run:pass",
+      "kind": "run",
+      "cmd": "npm run test:load",
+      "rc": 0,
+      "tail": "  PDF §11 footprint measurement — REPORTED (local != target runtime) | [rss] PASSED | [run-tests] load: 3 passed, 0 failed"
+    },
+    {
+      "id": "smoke",
+      "status": "cited",
+      "kind": "cited",
+      "cmd": "npm run smoke",
+      "note": "rc=0 prior runs"
+    },
+    {
+      "id": "pdf-closure",
+      "status": "cited",
+      "kind": "cited",
+      "cmd": "pdftotext -layout \"$AHP_PDF_PATH\" /tmp/ahp-pdf.txt && node scripts/verify-pdf-closure.mjs --text /tmp/ahp-pdf.txt --coverage docs/coverage.md --pdf \"$AHP_PDF_PATH\" --expect-sha256 044e045b73b7c34b642bd3c9eb5701b93eed470873a1e0a44e8b1d024821a7e2",
+      "note": "REPRODUCIBLE every-PDF-section->evidence gate (acc #2): derives 18 top-level sections from the canonical PDF СОДЕРЖАНИЕ (sha 044e..a7e2, shasum-verified) and FAILs if coverage.md omits one. Proven this turn @81328ec: PDF_CLOSURE=PASS sections=18 rc=0; negative (drop a section row) -> FAIL rc=1; integrity (bad sha) -> rc=2. Needs canonical PDF OUTSIDE git, so it is NOT executed inside the offline pack."
+    },
+    {
+      "id": "integrated-crossplane",
+      "status": "cited",
+      "kind": "cited",
+      "cmd": "npm run check && test:go:scoped",
+      "note": "DIRECTOR independently verified cross-plane GREEN on VM target-runtime @ck42 abcfe84 (memory/artifacts/workspace/state/conformance rc=0)"
+    },
+    {
+      "id": "go-build-whole-tree-offline",
+      "status": "cited",
+      "kind": "cited",
+      "cmd": "GOPROXY=off go build ./...",
+      "note": "rc=0 offline @0934ddf (host modcache pre-seeded: go-sdk v1.8.0 + OTel v1.47.0 present) — G-GOSDK/G-OTEL-BUILD CLOSED on host"
+    },
+    {
+      "id": "emil-tool-completion",
+      "status": "run:pass",
+      "kind": "run",
+      "note": "CLOSED via live-journey-whole: real Emil-core:18000 core_skill_activate succeeded + Emil provenance tool_calls>=1 (backend model-base fixed)"
+    },
+    {
+      "id": "whole-system-race",
+      "status": "cited",
+      "kind": "cited",
+      "cmd": "go test -race ./...",
+      "note": "DIRECTOR closed G-WHOLETEST-VM on VM (go1.26.2, -race rc=0 for state/conformance real-PG + workspace PG+MinIO on merged canonical 012a849+3033dd4); ck46 adds only scripts/docs (no product code), so product-code race result applies to this checkout"
+    },
+    {
+      "id": "tier2a2b-l4-iam-compose-otlp",
+      "status": "gated",
+      "kind": "gated",
+      "owner": "director/VM",
+      "note": "OPEN VM target-runtime: apply/HA, inter-service mTLS mesh, §11 p95 target, hosted OTLP, IAM tiers. ADD: composed /a2a/public requires a full-scope WORKLOAD principal (transport.Human vs deployment-scope contradiction; -31401) -> model/tool journey belongs to the SEPARATED execution plane (role=execution, proven by execution + VM), not the composed preview."
+    }
+  ],
+  "integratedRevision": {
+    "checkout": "delivery/integrated-90a33a5",
+    "head": "cd23c1d",
+    "tree": "2d01f14acea9daf7983b2ad3d8665640d9ca6a94",
+    "productBase": "8b14a59",
+    "composition": "c39d9627(accepted iv#74 core) + canonical Space tip 90a33a5 + executor(c405d83/6d0f518 seam) + delivery tooling",
+    "productDiffVsSpace90a33a5": "internal/executor/* + cmd/ahp/role_execution.go only",
+    "depsVsCore": "go.mod/go.sum/compose.yaml byte-identical to c39d9627 (oauth2 not downgraded)",
+    "bundle": "acceptance/integration/delivery/delivery-integrated-degate-cd23c1d.bundle sha256 c4211a01c1f7a4b7a4a40fcbd65e0b103a3789183fc25413e9e7da1647cad273 (requires c39d9627)",
+    "deployedBinSha256": "88213c15b858b42c6d290753171d336b48d53c6318c4cb89da0d443aba3decd0"
+  },
+  "macSafeGatesRefresh2026_10_30": {
+    "ranOn": "bin/ahp-full-tagged -tags ahp_exec ahp_data (sha 88213c15..), isolated DB ahp_hive_delivery, MinIO :29000",
+    "separatedRolesOTel": "PASS (state/identity/data/execution each own process; readyz 200; foreign plane 404; OTel >=4 spans/role)",
+    "verifyCompose": "PASS (7) fresh schema + roles+healthchecks + pinned images",
+    "verifyDurableMtls": "PASS (10) mTLS state+data sha256(PUT)==GET on REAL MinIO + foreign-tenant 404 + DURABLE-AFTER-RESTART real PG",
+    "selfcheck": "PASS (10) authenticated state+data on real PG/MinIO; executor mounted (0 not-mounted)",
+    "chaos": "PASS (8/8) op-key-reuse/unknown-outcome(lease-expiry,STALE_EPOCH,epoch-fence,idempotent-replay)/restart(SIGKILL durability)/cancel-delete/checkpoint-rollback/data-isolation/graceful-shutdown",
+    "loadLocal": "checkpoint p95=158.8ms (§11 <=300 WITHIN,local), healthz p95=51ms, RSS 18.9MB (local != target)",
+    "tierManifestLint": "PASS after pinning Tier0/2A images :latest -> :sha-<source> (fix)",
+    "pdfClosure": "PASS (18/18 sections mapped)"
+  },
+  "d2DeGateRefresh2026_10_30": {
+    "ruling": "director b9f9b174 (Emil-core container name/port NOT a readiness gate); user/root correction",
+    "deGate": "tests/e2e/live-journey.mjs -> blob f8ec7b96: dropped revoked card.name==='core-agent' gate; target=REAL A2A tool-runtime AHP_TOOL_RUNTIME_URL (AHP_EMIL_URL alias); gate=VALID A2A agent-card (name+version+capabilities), NOT container name; anti-stand-in :19081 + anti-mock guards UNCHANGED",
+    "runbook": "docs/vm-plane-runbook.md invariants rebased TRUTHFULLY to accepted core c39d9627 (prev 012a849-empty diff was FALSE post iv#74 durability): INV1a go.mod/go.sum/compose/pkg EMPTY vs c39d9627 (oauth2 not downgraded); INV1b product-delta == canonical producer planes only, no delivery-authored product code; INV2 legG0 wired=2; INV3 journey blob f8ec7b96. All green on real head.",
+    "ivLegA": "verify:iv IV_VERIFY=PARTIAL pass=2 red=0 on DE-GATED blob (A1 anti-stand-in :19081 PASS, A2 anti-mock PASS; G0/B/C honest PENDING) -> de-gate did NOT weaken fail-closed",
+    "npmSmoke": "RUN PASS: npm run smoke self-spawn role=all mTLS :19619 -> /healthz 200 {status:ok} on isolated DB ahp_hive_delivery (reused product-identical bin; product unchanged since fa62df2)",
+    "npmCheck": "VM-GATED (not forced on Mac): npm run check = go vet + go test -race whole-tree; swap ~1.3GiB / disk 15Gi<DATA_MIN 20 -> director VM leg",
+    "roundTrip": "clone+checkout head -> tree b5d8a262, blob f8ec7b96, name-gate 0, drift 0; bundle fetch given prereq c39d9627 -> 19c90e3",
+    "selfRefNote": "this pack edit itself bumps the checkout tree by one commit; authoritative integrated head + bundle sha256 = newest forum report (40617056)",
+    "rerunOn5868225": "All Mac-safe gates re-run GREEN on de-gated head 5868225 (product byte-identical to fa62df2): verify:pdf-closure 18/18; npm run smoke RUN PASS; tier-manifest-lint PASS; separated-roles-smoke PASS(4 roles,OTel 4-5 spans,foreign=404); composed-backend-selfcheck PASS(10); verify-durable-mtls PASS(10: REAL MinIO sha PUT==GET + foreign 404 + durable-after-restart REAL PG); verify:iv leg A PASS (de-gated). npm check (-race whole-tree) + chaos/load target = VM gate (byte-identical product, prior chaos 8/8 + load p95 carried).",
+    "deGateRegression": "A3 anti-empty-agentcard added to scripts/iv-verify.mjs: in-process HTTP server returns 200 + {} -> live-journey MUST reject (not a valid A2A agent-card) -> proves D2 de-gate is fail-closed, not a rubber stamp. --only A => IV_VERIFY=GREEN pass=3 red=0. product blob f8ec7b96 unchanged, drift vs c39d9627 = 0.",
+    "harnessHardening": "(1) iv-verify A3 anti-empty-agentcard: proves D2 de-gate fail-closed (HTTP200 {} rejected), --only A GREEN(3). (2) vm-plane g0BlocksBin: criterion-#3 native-Qwen-only must be GREEN before load/data/otlp legs exec a checkout bin (closes non-native model-start hole); verified on Mac dry-run that legs go PENDING not bin-start. All VM-leg targets exist; iv-owned native-qwen-assert.sh present."
+  }
+}
