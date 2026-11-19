@@ -74,16 +74,17 @@ type Coordinator struct {
 	signer             *auth.Signer
 	audience           string
 
-	runGrants       RunGrantIssuer
-	requireRunGrant bool
-	runGrantCaps    []string
-	runGrantTTL     time.Duration
-	runGrantActive  int
-	runGrantFanout  int
-	mu              sync.RWMutex
-	turns           map[string]*Turn
-	active          map[string]context.CancelFunc
-	lastSweepErr    string
+	runGrants           RunGrantIssuer
+	requireRunGrant     bool
+	runGrantCaps        []string
+	runGrantTTL         time.Duration
+	runGrantActive      int
+	runGrantFanout      int
+	mu                  sync.RWMutex
+	turns               map[string]*Turn
+	active              map[string]context.CancelFunc
+	terminalCheckpoints terminalCheckpointCache
+	lastSweepErr        string
 	// streamAppend bounds ONE durable AppendStream call; see streamAppendBudget.
 	streamAppend time.Duration
 
@@ -899,10 +900,17 @@ func stepErrorCause(content json.RawMessage) string {
 
 // executeTurn runs the Core loop for a single turn with heartbeat keepalive.
 func (c *Coordinator) executeTurn(ctx context.Context, turn *Turn, lease *leaseResponse, taskToken string) {
+	released := false
 	defer func() {
 		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.turns[turn.ID] != turn || turn.leaseEpoch != lease.Epoch {
+			return
+		}
 		delete(c.active, turn.ID)
-		c.mu.Unlock()
+		if released && turn.Status.IsTerminal() {
+			c.rememberTerminalCheckpoint(turn)
+		}
 	}()
 
 	// failPreflight is used by EVERY preflight branch, all of which run BEFORE Core starts, so a
@@ -1321,7 +1329,7 @@ func (c *Coordinator) executeTurn(ctx context.Context, turn *Turn, lease *leaseR
 		}
 		lastSnapshotID = resp.ID
 		c.mu.Lock()
-		turn.Checkpoint = &Checkpoint{ID: resp.ID, Namespace: resp.Namespace, Parent: resp.Parent, Version: resp.Version, Metadata: resp.Metadata, TurnID: turn.ID, Sequence: snapshotSeq, State: lastSnapshotInner, Messages: lastSnapshotMsgs, CreatedAt: resp.CreatedAt}
+		turn.Checkpoint = &Checkpoint{ID: resp.ID, Namespace: resp.Namespace, Parent: resp.Parent, Version: resp.Version, Metadata: resp.Metadata, TurnID: turn.ID, Sequence: snapshotSeq, State: lastSnapshotInner, Messages: lastSnapshotMsgs, CreatedAt: resp.CreatedAt, runtimeSnapshot: true}
 		c.mu.Unlock()
 	}
 	writeSnapshot := func(kind string, content json.RawMessage, persist bool) {
@@ -1638,6 +1646,8 @@ func (c *Coordinator) executeTurn(ctx context.Context, turn *Turn, lease *leaseR
 		slog.Warn("space: run release did not reach State",
 			"run_id", lease.Run.ID, "thread_id", turn.ThreadID, "epoch", lease.Epoch,
 			"status", status, "close_reason", closeReason, "err", err.Error())
+	} else {
+		released = true
 	}
 }
 
@@ -2651,6 +2661,7 @@ func (c *Coordinator) DeleteChat(ctx context.Context, token, threadID string) er
 // writes into.
 func (c *Coordinator) forgetThread(threadID string) {
 	c.mu.Lock()
+	c.terminalCheckpoints.forgetThread(threadID)
 	for id, t := range c.turns {
 		if t.ThreadID == threadID {
 			delete(c.turns, id)

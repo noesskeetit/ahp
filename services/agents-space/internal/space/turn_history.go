@@ -569,7 +569,7 @@ func (h *Handler) turnForRead(r *http.Request, turnID string) (Turn, error) {
 		// durable record once; if it is terminal, that truth wins over the local pending,
 		// and the face the user is watching converges on what the runner and State say.
 		if snapshot.Status.IsTerminal() || h.coordinator.IsExecuting(turnID) {
-			return snapshot, nil
+			return h.loadTurnCheckpoint(r, snapshot)
 		}
 		if durable := h.hydrateDurableTurn(r, turnID); durable != nil && durable.Status.IsTerminal() {
 			h.coordinator.foldTerminalSnapshot(*durable)
@@ -598,7 +598,7 @@ func (h *Handler) turnForRead(r *http.Request, turnID string) (Turn, error) {
 		return Turn{}, err
 	}
 	if live, ok := h.coordinator.TurnSnapshot(turnID); ok {
-		return live, nil // this process claimed it while we were reading
+		return h.loadTurnCheckpoint(r, live) // this process claimed it while we were reading
 	}
 	return *t, nil
 }

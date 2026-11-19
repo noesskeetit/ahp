@@ -5,6 +5,7 @@ package space_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,67 @@ import (
 	"github.com/ahp-platform/ahp/internal/space"
 	"github.com/ahp-platform/ahp/pkg/contracts"
 )
+
+func TestCompletedTurnCheckpointReadAfterEvictionRealState(t *testing.T) {
+	e := cNewEnv(t)
+	coord := space.NewCoordinator(space.CoordinatorConfig{
+		StateClient: e.client, Core: &stubCore{stepsBeforeDone: 1}, WorkerID: "w-terminal-cache",
+	})
+	server := httptest.NewServer(space.NewHandler(space.HandlerConfig{
+		Coordinator:       coord,
+		Auth:              space.ExchangeMiddleware(realTaskExchanger{e}, authByHeader(e.tenant, e.deployment)),
+		RequireScopedTask: true,
+	}))
+	defer server.Close()
+	ctxID := "terminal-cache-" + contracts.NewID()
+	var first space.Turn
+	for i := 0; i < 65; i++ {
+		status, body := postSpaceAs(t, server.URL, "AcceptTurn", map[string]any{
+			"key": fmt.Sprintf("%s-%d", ctxID, i), "context_id": ctxID,
+			"input":     map[string]any{"role": "user", "content": fmt.Sprintf("input-number-%d", i)},
+			"max_steps": 4,
+		}, "ada")
+		if status != http.StatusOK {
+			t.Fatalf("AcceptTurn %d: HTTP %d %s", i, status, body)
+		}
+		id, _ := decodeMap(t, body)["turn_id"].(string)
+		if status, body := postSpaceAs(t, server.URL, "DispatchTurn", nil, "ada"); status != http.StatusOK {
+			t.Fatalf("DispatchTurn %d: HTTP %d %s", i, status, body)
+		}
+		var turn space.Turn
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if turn, _ = coord.TurnSnapshot(id); turn.Status.IsTerminal() && !coord.IsExecuting(id) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("turn %d did not finish: %s", i, turn.Status)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if turn.Status != space.TurnDone || turn.Checkpoint == nil {
+			t.Fatalf("turn %d did not produce a done checkpoint: %+v", i, turn)
+		}
+		if i == 0 {
+			first = turn
+		}
+	}
+	evicted, _ := coord.TurnSnapshot(first.ID)
+	if evicted.Checkpoint == nil || len(evicted.Checkpoint.Metadata) != 0 {
+		t.Fatal("first checkpoint body is still retained")
+	}
+	req := map[string]any{"turn_id": first.ID}
+	status, body := postSpaceAs(t, server.URL, "GetTurn", req, "ada")
+	var loaded space.Turn
+	if status != http.StatusOK || json.Unmarshal(body, &loaded) != nil || loaded.Checkpoint == nil ||
+		loaded.Checkpoint.ID != first.Checkpoint.ID || loaded.Steps != first.Steps ||
+		!strings.Contains(string(loaded.Checkpoint.Messages), "input-number-0\"") {
+		t.Fatalf("GetTurn did not read the evicted checkpoint: HTTP %d %s", status, body)
+	}
+	if status, _ := postSpaceAs(t, server.URL, "GetTurn", req, "foreign"); status != http.StatusNotFound {
+		t.Fatalf("GetTurn exposed another owner's checkpoint: HTTP %d", status)
+	}
+}
 
 // TestRuntimeSnapshotWriterOnRealState is acceptance leg (1) of the snapshot-writer
 // block, against the REAL State server on PostgreSQL: the process that EXECUTES the

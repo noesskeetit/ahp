@@ -447,6 +447,14 @@ func (c *StateClient) PutCheckpoint(ctx context.Context, token string, f Fence, 
 	return &out, nil
 }
 
+func (c *StateClient) getCheckpoint(ctx context.Context, token, threadID, namespace, id string) (checkpointResponse, error) {
+	var out checkpointResponse
+	err := c.call(ctx, "GetCheckpoint", token, map[string]string{
+		"thread_id": threadID, "namespace": namespace, "id": id,
+	}, &out)
+	return out, err
+}
+
 // ListCheckpoints returns the most recent checkpoints for a thread within a
 // namespace, newest-first. The published State contract has no single
 // "load latest" op; cold resume asks for limit=1 and takes the head of this

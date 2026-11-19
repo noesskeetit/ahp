@@ -210,6 +210,9 @@ type Checkpoint struct {
 	Sequence int             `json:"sequence"`
 	State    json.RawMessage `json:"state"`
 	Messages json.RawMessage `json:"messages"`
+
+	runtimeSnapshot bool
+	payloadCold     bool
 }
 
 // HITLRequest is a human-in-the-loop approval gate.

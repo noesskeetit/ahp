@@ -512,6 +512,10 @@ func (h *Handler) listTurns(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		if err := h.coordinator.loadTurnCheckpoints(r.Context(), token, merged); err != nil {
+			transport.WriteError(w, r, err)
+			return
+		}
 		resp["turns"] = merged
 		transport.WriteJSON(w, http.StatusOK, resp)
 		return
@@ -541,6 +545,10 @@ func (h *Handler) listTurns(w http.ResponseWriter, r *http.Request) {
 	if limit > 0 && len(merged) > limit {
 		merged = merged[:limit]
 		partial = true // rows are knowingly held back: say so instead of truncating quietly
+	}
+	if err := h.coordinator.loadTurnCheckpoints(r.Context(), token, merged); err != nil {
+		transport.WriteError(w, r, err)
+		return
 	}
 	resp["turns"] = merged
 	if partial {
