@@ -57,6 +57,24 @@ Clients preserve stable mutation keys and supply the current lease epoch. The Go
 
 Small values stay inline up to 256 KiB. The direct S3 stage route supports values up to 4 MiB and returns a content-addressed reference scoped to the session. A short, durable staging mark protects reused S3 objects until their staging period ends. The upload runs outside the PostgreSQL transaction. A producer rechecks its lease after upload. Shared KV values stay inline. Reads verify the stored size and digest. Session deletion fences the old worker immediately. The reaper preserves held sessions and revisits incomplete cleanup. An authorized operator grant with `state.retention` can set and release a hold before cleanup begins.
 
+## Platform origin
+
+With `AHP_ENABLE_COMPACT_STATE=1`, the ordinary AHP process serves the native
+session API at the same mTLS origin as the other platform services. The local
+full-system launcher enables it. The all-in-one mode uses live Identity grants
+including revocation. The standalone state role checks explicit signed task
+capabilities.
+
+The native dispatch flow is enqueue, claim, heartbeat, framework writes, then
+a terminal append with `finish_turn`. Native adapters keep queue control
+records out of their framework history while tracking the durable cursor.
+Go callers can use `FinishClaimedTurn` with a prepared payload. A retry must
+reuse that payload and the original input position.
+
+The legacy RPC client, administration, and older deployments can still use
+the State RPC routes. The native routes do not transfer existing runs or
+legacy queue history.
+
 ## Verify
 
 Use a disposable database named with the `ahp_carbon_compact` prefix. The journal integration tests also accept a local disposable MinIO instance through `AHP_JOURNAL_TEST_S3`, `AHP_JOURNAL_TEST_S3_ACCESS`, and `AHP_JOURNAL_TEST_S3_SECRET`.

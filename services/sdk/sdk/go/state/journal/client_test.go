@@ -268,3 +268,45 @@ func newTestJournal(t *testing.T, handler http.Handler) *journal.Client {
 	}
 	return client
 }
+
+func TestFinishClaimedTurnReplaysPreparedResult(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got struct {
+			Epoch int64 `json:"lease_epoch"`
+			journal.AppendRequest
+		}
+		if r.URL.Path != "/v1/state/sessions/session/events:append" {
+			t.Errorf("unexpected terminal route %s", r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil ||
+			got.Epoch != 8 || got.ExpectedSeq != 12 || got.Key != "turn.completed:4" ||
+			got.FinishTurn != "WAITING_INPUT" || len(got.Events) != 1 ||
+			got.Events[0].Type != "turn.completed" || got.Events[0].Payload.Blob == nil {
+			t.Errorf("invalid completion request %+v: %v", got, err)
+		}
+		calls.Add(1)
+		fmt.Fprint(w, `{"first_seq":13,"head_seq":13}`)
+	}))
+	defer server.Close()
+
+	c, err := journal.New(journal.Config{BaseURL: server.URL, HTTPClient: server.Client(),
+		TokenSource: func(context.Context) (string, error) { return "test-task", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn := journal.ClaimedTurn{}
+	turn.SessionID, turn.Epoch, turn.InputSeq = "session", 8, 4
+	payload := journal.Payload{Blob: &journal.BlobRef{ArtifactID: "fixture", SizeBytes: 300_000}}
+	for range 2 {
+		receipt, err := c.FinishClaimedTurn(context.Background(), turn, 12, payload, true)
+		if err != nil || receipt.HeadSeq != 13 {
+			t.Fatalf("terminal replay returned %+v: %v", receipt, err)
+		}
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("terminal method re-staged or retried unexpectedly: %d requests", calls.Load())
+	}
+}

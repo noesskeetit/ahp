@@ -146,3 +146,19 @@ async def test_adk_accepts_explicit_none_epoch_for_a_cold_read():
     assert (restored.state, [event.id for event in restored.events]) == ({"count": 1}, ["stored"])
     assert [call[0] for call in transport.calls] == ["GET"]
     assert reader._projection is None
+
+
+async def test_claimed_adk_turn_can_initialize_after_queue_input():
+    transport = ADKTransport()
+    transport.sessions["queued"] = {
+        "epoch": 3, "rows": [{"seq": 1, "id": "turn.input:fixture", "type": "turn.input",
+                              "role": "user", "codec": "json", "payload": {"inline": "e30="}}],
+        "kv": {}, "catalog": {}, "status": "ACTIVE",
+    }
+    identity = {"app_name": "app", "user_id": "user", "session_id": "queued"}
+    journal = AHPJournalSessionService(transport, **identity, lease_epoch=3)
+    session = await journal.create_session(**identity, state={"mode": "native"})
+    assert session.state == {"mode": "native"}
+    assert session.events == []
+    assert transport.sessions["queued"]["rows"][1]["type"] == "adk.init"
+    assert not any(path.endswith(":acquire") for _, path, _, _ in transport.calls)

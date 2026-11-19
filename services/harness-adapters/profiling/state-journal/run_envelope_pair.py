@@ -216,7 +216,7 @@ async def run(client, args):
             await execute_turn(client, thread_id, worker_name, args.mode, worker_token)
         warmed[index].set()
         await start.wait()
-        for _ in range(100 // args.concurrency):
+        for _ in range(args.turns // args.concurrency + (index < args.turns % args.concurrency)):
             active += 1
             peak = max(peak, active)
             try:
@@ -239,7 +239,7 @@ async def run(client, args):
     finally:
         StateAPIClient._request = original
     count = len(samples["turn"])
-    assert count == 100 and peak == args.concurrency
+    assert count == args.turns and peak == args.concurrency
     receipt_route = "FenceAndLookup" if args.mode == "dispatch" else "GetResult"
     assert len(rpc["tools POST Call"]) == len(rpc["tools POST " + receipt_route]) == count
     peak_claimed = claimed = 0
@@ -263,13 +263,16 @@ async def run(client, args):
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("legacy", "compact", "dispatch"))
-    parser.add_argument("concurrency", type=int, choices=(1, 10))
+    parser.add_argument("concurrency", type=int)
+    parser.add_argument("--turns", type=int, default=100)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--history", type=int, required=True)
     parser.add_argument("--sql-target-db")
     parser.add_argument("--sql-monitor-db", default="postgres")
     parser.add_argument("--psql", default="psql")
     args = parser.parse_args()
+    if not 1 <= args.concurrency <= min(args.turns, 512):
+        parser.error("concurrency must be positive and at most min(turns, 512)")
     hand = json.loads(Path(os.environ["AHP_STATE_HANDSHAKE"]).read_text())
     args.worker_tokens = hand.get("worker_tokens", [])
     async with mtls_client(hand) as client:

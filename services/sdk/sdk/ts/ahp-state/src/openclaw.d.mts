@@ -1,4 +1,4 @@
-import type {CatalogUpdate, CompactJournalClient, JournalClientConfig} from './index.mjs';
+import type {CatalogUpdate, CompactJournalClient, JournalClientConfig, TurnLease} from './index.mjs';
 import type {ToolGateway} from './deepseek.mjs';
 
 export interface OpenClawMetadata { id: string; createdAt: string }
@@ -34,7 +34,11 @@ export class CompactOpenClawStorage<
 > implements OpenClawNativeStorage<M, E> {
   constructor(core: OpenClawNativeStorageCore<M, E>, client: Pick<CompactJournalClient, 'request'>,
     sessionId: string, options?: OpenClawStorageOptions);
-  open(options?: {readOnly?: boolean}): Promise<this>;
+  open(options?: {
+    readOnly?: boolean;
+    /** The host owns renewal and terminal disposition of this queued turn. */
+    preclaimedTurn?: Pick<TurnLease, 'session_id' | 'epoch' | 'input_seq' | 'head_seq'>;
+  }): Promise<this>;
   getMetadata(): Promise<M>;
   getLeafId(): Promise<string | null>;
   getAppendParentId(): Promise<string | null>;

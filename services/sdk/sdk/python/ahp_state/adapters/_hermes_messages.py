@@ -156,9 +156,15 @@ class JournalMessages:
                     break
                 if row["seq"] != offset + 1:
                     raise ValueError("Hermes journal contains a gap")
+                offset = row["seq"]
+                if (row["codec"] == "json" and (row["type"], row["role"]) in
+                        {("turn.input", "user"), ("turn.completed", "assistant")}):
+                    # The dispatcher owns these rows. They count towards the
+                    # physical frontier, but do not change the native conversation.
+                    yield row["type"], offset, None, "", 0
+                    continue
                 data = self._load_payload(row["payload"])
                 decoded = json.loads(data)
-                offset = row["seq"]
                 if row["type"] == EVENT_TYPE and row["codec"] == CODEC:
                     uid = decoded["message_uid"]
                     if row["id"] not in {f"hermes:message:{uid}", f"hermes:compacted:{offset}:{uid}"}:

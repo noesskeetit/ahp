@@ -217,6 +217,10 @@ class AHPJournalSessionService(BaseSessionService):
                             raise StateValidationError("INVALID_ARGUMENT", "ADK event appears before initialization")
                         event = Event.model_validate(await self._value(row["payload"]))
                         projection.remember(event)
+                    elif not projection.created_at and not (
+                        row["type"] == "turn.input" and row["role"] == "user" and row["codec"] == "json"
+                    ):
+                        raise StateValidationError("INVALID_ARGUMENT", "ADK session has unexpected records before initialization")
                 if after < head:
                     if not page.get("events"):
                         raise StateValidationError("INVALID_ARGUMENT", "ADK journal history is incomplete")
@@ -483,7 +487,7 @@ class AHPJournalSessionService(BaseSessionService):
     async def _create(self, values):
         async with self.lock:
             projection = await self._read()
-            if projection is None or projection.head:
+            if projection is None or projection.created_at:
                 raise StateValidationError("INVALID_ARGUMENT", "ADK session already exists or could not be acquired")
             created_at = time.time()
             delta = {key: value for key, value in values.items() if not _ephemeral(key)}

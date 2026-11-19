@@ -45,7 +45,7 @@ func envelopeInt(t *testing.T, variable string, fallback int) int {
 	return n
 }
 
-func newRunEnvelopeStand(t *testing.T, mode, dsn string) runEnvelopeStand {
+func newRunEnvelopeStand(t *testing.T, mode, dsn string, workersCount int) runEnvelopeStand {
 	t.Helper()
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil || cfg.ConnConfig.Host != "127.0.0.1" ||
@@ -136,7 +136,7 @@ func newRunEnvelopeStand(t *testing.T, mode, dsn string) runEnvelopeStand {
 		if err := json.Unmarshal(data, &config); err != nil {
 			t.Fatal(err)
 		}
-		workers := make([]string, 10)
+		workers := make([]string, workersCount)
 		for index := range workers {
 			workers[index], err = issue(ctx, benchScope, "benchmark-worker-"+strconv.Itoa(index))
 			if err != nil {
@@ -186,8 +186,27 @@ func TestLangGraphPairedRunEnvelope(t *testing.T) {
 	if compactMode != "compact" && compactMode != "dispatch" {
 		t.Fatal("benchmark compact mode must be compact or dispatch")
 	}
+	steps := []int{1, 10}
+	if raw := os.Getenv("AHP_JOURNAL_BENCH_STEPS"); raw != "" {
+		steps = nil
+		previous := 0
+		for _, value := range strings.Split(raw, ",") {
+			step, err := strconv.Atoi(strings.TrimSpace(value))
+			if err != nil || step <= previous || step > 512 {
+				t.Fatal("benchmark steps must be strictly increasing and at most 512")
+			}
+			steps = append(steps, step)
+			previous = step
+		}
+	}
+	minTurns := envelopeInt(t, "AHP_JOURNAL_BENCH_TURNS", 100)
+	if minTurns < 1 || minTurns > 50000 {
+		t.Fatal("benchmark needs at least one measured turn, up to 50000")
+	}
+	workerCount := steps[len(steps)-1]
 	stands := map[string]runEnvelopeStand{
-		"legacy": newRunEnvelopeStand(t, "legacy", legacyDSN), compactMode: newRunEnvelopeStand(t, compactMode, compactDSN),
+		"legacy":    newRunEnvelopeStand(t, "legacy", legacyDSN, workerCount),
+		compactMode: newRunEnvelopeStand(t, compactMode, compactDSN, workerCount),
 	}
 	if stands["legacy"].database == stands[compactMode].database {
 		t.Fatal("benchmark must use separate database names")
@@ -201,17 +220,18 @@ func TestLangGraphPairedRunEnvelope(t *testing.T) {
 		if round%2 == 0 {
 			modes = []string{compactMode, "legacy"}
 		}
-		for _, concurrency := range []int{1, 10} {
+		for index, concurrency := range steps {
+			turns := max(minTurns, concurrency*3)
 			for _, mode := range modes {
 				name := mode + "-r" + strconv.Itoa(round) + "-n" + strconv.Itoa(concurrency)
 				ok := t.Run(name, func(t *testing.T) {
 					stand := stands[mode]
 					seedCount := 0
-					if round == 1 && concurrency == 1 {
+					if round == 1 && index == 0 {
 						seedCount = seed
 					}
 					args := []string{"profiling/state-journal/run_envelope_pair.py", mode, strconv.Itoa(concurrency),
-						"--seed", strconv.Itoa(seedCount), "--history", strconv.Itoa(history)}
+						"--seed", strconv.Itoa(seedCount), "--history", strconv.Itoa(history), "--turns", strconv.Itoa(turns)}
 					if psql := os.Getenv("AHP_JOURNAL_BENCH_PSQL"); psql != "" {
 						args = append(args, "--psql", psql, "--sql-target-db", stand.database)
 					}
@@ -230,13 +250,13 @@ func TestLangGraphPairedRunEnvelope(t *testing.T) {
 					if err != nil || !json.Valid(raw) {
 						t.Fatalf("invalid benchmark result: %v\n%s%s", err, raw, stderr.Bytes())
 					}
-					if got := atomic.LoadInt32(&stand.fixture.effCount) - before; int(got) != 100+history*concurrency {
-						t.Fatalf("MCP upstream effects = %d, want %d", got, 100+history*concurrency)
+					if got := atomic.LoadInt32(&stand.fixture.effCount) - before; int(got) != turns+history*concurrency {
+						t.Fatalf("MCP upstream effects = %d, want %d", got, turns+history*concurrency)
 					}
 					if err := os.WriteFile(filepath.Join(output, name+".json"), raw, 0600); err != nil {
 						t.Fatal(err)
 					}
-					t.Logf("turns=100 effects=100 verified_history=%d", history*concurrency)
+					t.Logf("turns=%d effects=%d verified_history=%d", turns, turns, history*concurrency)
 				})
 				if !ok {
 					return

@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {isDeepStrictEqual} from 'node:util';
 import {beginStandaloneTool, loadJournalJSON, storeJournalJSON} from '../payload.mjs';
 import {settleGatewayCall} from '../tool-gateway.mjs';
+import {assertActiveTurn, isTurnControl} from '../turn-control.mjs';
 
 const API = '/v1/state';
 const HEADER = 'oc:header';
@@ -61,8 +62,13 @@ export class CompactOpenClawStorage {
     this.gatewayMode = false;
   }
 
-  async open({readOnly = false} = {}) {
-    if (!readOnly) {
+  async open({readOnly = false, preclaimedTurn} = {}) {
+    if (preclaimedTurn) {
+      if (readOnly) throw new TypeError('Preclaimed turns require write access');
+      await assertActiveTurn(this.client, this.path, this.sessionId, preclaimedTurn);
+      this.epoch = preclaimedTurn.epoch;
+      this.preclaimed = true;
+    } else if (!readOnly) {
       const lease = await this.client.request('POST', API + '/sessions:acquire', {body: {
         session_id: this.sessionId, harness_type: 'openclaw', format_version: 1, ttl_ms: this.ttlMs,
       }});
@@ -72,14 +78,14 @@ export class CompactOpenClawStorage {
     this.head = 0;
     try {
       await this.refresh();
-      if (!this.head) {
+      if (!this.view) {
         if (readOnly) throw new Error('OpenClaw journal is not materialized');
         const metadata = {id: this.sessionId, createdAt: new Date().toISOString()};
         this.view = new this.core.InMemorySessionStorage({metadata});
         await this.commit(event(HEADER, 'openclaw.header', 'system', await this.storePayload(metadata)),
           this.catalog === undefined ? {} : {catalog: this.catalog});
       }
-      if (!readOnly && this.heartbeat) {
+      if (!readOnly && this.heartbeat && !preclaimedTurn) {
         this.timer = setInterval(() => this.renew().catch(error => {
           if (error.code === 'STALE_EPOCH') this.fence(error);
         }), Math.max(100, this.ttlMs / 3));
@@ -108,7 +114,8 @@ export class CompactOpenClawStorage {
         if (item.seq > first.head_seq) break;
         if (item.seq !== cursor + 1) throw new Error('OpenClaw journal history is incomplete');
         cursor = item.seq;
-        if (cursor === 1) {
+        if (isTurnControl(item)) continue;
+        if (!this.view && !metadata) {
           if (item.id !== HEADER || item.type !== 'openclaw.header') throw new Error('OpenClaw journal header missing');
           metadata = await loadJournalJSON(this.client, this.path, item.payload);
           if (metadata.id !== this.sessionId) throw new Error('OpenClaw journal identity mismatch');
@@ -129,8 +136,8 @@ export class CompactOpenClawStorage {
     try {
       if (metadata) this.view = new this.core.InMemorySessionStorage({metadata, entries});
       else for (const entry of entries) await this.view.appendEntry(entry);
-      const leaf = await this.view.getLeafId();
-      const parent = await this.view.getAppendParentId();
+      const leaf = await this.view?.getLeafId();
+      const parent = await this.view?.getAppendParentId();
       if ((leaf ? eventId(leaf) : '') !== (first.leaf_entry_id ?? '') ||
           (parent ? eventId(parent) : '') !== (first.append_parent_id ?? '')) {
         throw new Error('OpenClaw journal pointers do not match the native tree');
@@ -380,7 +387,7 @@ export class CompactOpenClawStorage {
       try {
         await this.tail;
         await this.refreshing?.catch(() => {});
-        if (this.epoch && !this.poison) {
+        if (this.epoch && !this.poison && !this.preclaimed) {
           await this.client.request('POST', this.path + ':heartbeat', {body: {
             lease_epoch: this.epoch, release: true,
           }});

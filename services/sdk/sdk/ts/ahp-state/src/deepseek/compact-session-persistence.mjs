@@ -11,6 +11,7 @@ import {ToolCallRecovery, TOOL_OUTCOME_UNKNOWN} from '@deepseek-ai/dsh-session';
 import {createToolResultMessage} from '@deepseek-ai/dsh-llm';
 import {beginStandaloneTool, loadJournalJSON, storeJournalJSON} from '../payload.mjs';
 import {settleGatewayCall} from '../tool-gateway.mjs';
+import {assertActiveTurn, isTurnControl} from '../turn-control.mjs';
 
 const API = '/v1/state';
 const HEADER = 'dsh.header';
@@ -218,7 +219,7 @@ export default class CompactSessionPersistence extends SessionPersistence {
   }
 
   async readHeader(id, row) {
-    if (row?.seq !== 1 || row.id !== 'dsh:header' || row.type !== HEADER) {
+    if (row?.id !== 'dsh:header' || row.type !== HEADER) {
       throw new SessionPersistenceCorruptionError('Missing DeepSeek header');
     }
     const {header: native, inheritedEventCount, effectKeyVersion = 1} =
@@ -230,42 +231,73 @@ export default class CompactSessionPersistence extends SessionPersistence {
       throw new SessionPersistenceCorruptionError('Invalid DeepSeek inherited prefix');
     }
     return {id, header: this.verifyHeader(id, native), inheritedEventCount, effectKeyVersion,
-      log: [], head: 1, acked: 0};
+      log: [], head: row.seq, acked: 0, headerCommitted: true};
   }
 
-  async load(id, state, signal) {
-    let page = await this.getPage(id, state?.head ?? 0, 100, signal);
+  async load(id, state, signal, allowUnmaterialized = false) {
+    let cursor = state?.head ?? 0;
+    let page = await this.getPage(id, cursor, 100, signal);
     const head = page.head_seq;
-    if (head === 0) throw new SessionPersistenceNotFoundError(id);
-    if (state && head < state.head) {
+    if (head < cursor) {
       throw new SessionPersistenceCorruptionError('DeepSeek journal head moved backwards');
     }
-    while ((state?.head ?? 0) < head) {
-      const after = state?.head ?? 0;
-      if (!page.events?.length) throw new SessionPersistenceCorruptionError('Missing journal page');
-      const rows = page.events.filter(item => item.seq <= head);
-      if (!state) state = await this.readHeader(id, rows.shift());
+    while (cursor < head) {
+      const after = cursor;
       const suffix = [];
-      let cursor = state.head;
-      for (const item of rows) {
-        if (item.type !== EVENT || item.seq !== cursor + 1) {
+      for (const item of page.events ?? []) {
+        if (item.seq > head) break;
+        if (item.seq !== cursor + 1) {
+          throw new SessionPersistenceCorruptionError('DeepSeek journal has a sequence gap');
+        }
+        cursor = item.seq;
+        if (isTurnControl(item)) continue;
+        if (!state) {
+          state = await this.readHeader(id, item);
+          continue;
+        }
+        if (item.type !== EVENT) {
           throw new SessionPersistenceCorruptionError('Unexpected DeepSeek journal record');
         }
         suffix.push(await loadJournalJSON(this.client, this.path(id), item.payload));
-        cursor = item.seq;
       }
       if (cursor === after) throw new SessionPersistenceCorruptionError('Missing DeepSeek journal tail');
-      validateStoredEvents(state.header, suffix);
-      assertContiguous(id, suffix, state.log.length);
-      state.log.push(...suffix);
-      state.head = cursor;
-      state.acked = state.log.length;
+      if (state) {
+        validateStoredEvents(state.header, suffix);
+        assertContiguous(id, suffix, state.log.length);
+        state.log.push(...suffix);
+        state.head = cursor;
+        state.acked = state.log.length;
+      }
       if (cursor < head) page = await this.getPage(id, cursor, 100, signal);
+    }
+    if (!state) {
+      if (allowUnmaterialized) return {head};
+      throw new SessionPersistenceNotFoundError(id);
     }
     if (state.inheritedEventCount > state.log.length) {
       throw new SessionPersistenceCorruptionError('Invalid DeepSeek inherited prefix');
     }
     return state;
+  }
+
+  async readFirstHeader(id, signal) {
+    let page = await this.getPage(id, 0, 1, signal);
+    const head = page.head_seq;
+    let cursor = 0;
+    while (cursor < head) {
+      const after = cursor;
+      for (const item of page.events ?? []) {
+        if (item.seq > head) break;
+        if (item.seq !== cursor + 1) {
+          throw new SessionPersistenceCorruptionError('DeepSeek journal has a sequence gap');
+        }
+        cursor = item.seq;
+        if (!isTurnControl(item)) return {head, header: (await this.readHeader(id, item)).header};
+      }
+      if (cursor === after) throw new SessionPersistenceCorruptionError('Missing DeepSeek journal header page');
+      if (cursor < head) page = await this.getPage(id, cursor, 100, signal);
+    }
+    throw new SessionPersistenceNotFoundError(id);
   }
 
   async inspect(id, signal) {
@@ -280,11 +312,12 @@ export default class CompactSessionPersistence extends SessionPersistence {
     }
   }
 
-  track(state, lease) {
+  track(state, lease, preclaimed = false) {
     const handle = new CompactSessionHandle(this, state, 'write');
     handle.epoch = lease.epoch;
+    handle.preclaimed = preclaimed;
     this.writers.set(state.id, handle);
-    if (this.heartbeat) {
+    if (this.heartbeat && !preclaimed) {
       handle.timer = setInterval(() => handle.serialize(() => this.renew(handle)).catch(error => {
         if (error instanceof SessionOwnershipLostError) clearInterval(handle.timer);
       }), Math.max(100, this.ttlMs / 3));
@@ -304,36 +337,56 @@ export default class CompactSessionPersistence extends SessionPersistence {
         (header.isSeeded ? options?.inheritedEventCount === undefined : inheritedEventCount !== 0)) {
       throw new TypeError('isSeeded and inheritedEventCount must agree');
     }
-    if (this.writers.has(id) || await this.stat(id)) throw new SessionAlreadyExistsError(id);
+    if (this.writers.has(id)) throw new SessionAlreadyExistsError(id);
+    const preclaimed = options?.preclaimedTurn;
+    let head = 0;
     let lease;
-    try {
-      lease = await this.acquire(id);
-    } catch (error) {
-      if (error instanceof SessionAlreadyOwnedError) throw new SessionAlreadyExistsError(id);
-      throw error;
+    if (preclaimed) {
+      await assertActiveTurn(this.client, this.path(id), this.sessionId(id), preclaimed, options?.signal);
+      const stored = await this.load(id, undefined, options?.signal, true);
+      if (stored.header || this.writers.has(id)) throw new SessionAlreadyExistsError(id);
+      head = stored.head;
+      lease = preclaimed;
+    } else {
+      if (await this.stat(id)) throw new SessionAlreadyExistsError(id);
+      try {
+        lease = await this.acquire(id);
+      } catch (error) {
+        if (error instanceof SessionAlreadyOwnedError) throw new SessionAlreadyExistsError(id);
+        throw error;
+      }
+      if (lease.head_seq > 0) {
+        await this.client.request('POST', this.path(id) + ':heartbeat', {body: {
+          lease_epoch: lease.epoch, release: true,
+        }});
+        throw new SessionAlreadyExistsError(id);
+      }
     }
-    const handle = this.track({id, header, inheritedEventCount, effectKeyVersion: 2, log: [], head: 0, acked: 0}, lease);
-    try {
-      if (lease.head_seq > 0) throw new SessionAlreadyExistsError(id);
-      return handle;
-    } catch (error) {
-      await this.release(handle);
-      throw error;
-    }
+    return this.track({id, header, inheritedEventCount, effectKeyVersion: 2, log: [], head,
+      acked: 0, headerCommitted: false}, lease, Boolean(preclaimed));
   }
 
   async open(id, access, options) {
     options?.signal?.throwIfAborted();
     const writer = this.writers.get(id);
+    const preclaimed = options?.preclaimedTurn;
     if (access === 'read') {
+      if (preclaimed) throw new TypeError('Preclaimed turns require write access');
       const shared = writer?.state?.log ? writer.state : undefined;
       return new CompactSessionHandle(this, shared ?? await this.load(id, undefined, options?.signal), access, Boolean(shared));
     }
     if (access !== 'write') throw new TypeError('Expected read or write access');
     if (writer) throw new SessionAlreadyOwnedError(id);
-    await this.inspect(id, options?.signal);
-    const lease = await this.acquire(id);
-    const handle = this.track({id}, lease);
+    let lease;
+    if (preclaimed) {
+      await assertActiveTurn(this.client, this.path(id), this.sessionId(id), preclaimed, options?.signal);
+      if (this.writers.has(id)) throw new SessionAlreadyOwnedError(id);
+      lease = preclaimed;
+    } else {
+      await this.inspect(id, options?.signal);
+      lease = await this.acquire(id);
+    }
+    const handle = this.track({id}, lease, Boolean(preclaimed));
     try {
       handle.state = await this.load(id, undefined, options?.signal);
       handle.header = handle.state.header;
@@ -359,7 +412,7 @@ export default class CompactSessionPersistence extends SessionPersistence {
 
   async makeBatch(state, epoch) {
     const storePayload = value => storeJournalJSON(this.client, this.path(state.id), epoch, value);
-    const rows = state.head === 0 ? [row('dsh:header', HEADER, 'system', await storePayload({
+    const rows = !state.headerCommitted ? [row('dsh:header', HEADER, 'system', await storePayload({
       header: state.header, inheritedEventCount: state.inheritedEventCount,
       effectKeyVersion: state.effectKeyVersion,
     }))] : [];
@@ -374,7 +427,7 @@ export default class CompactSessionPersistence extends SessionPersistence {
       rows.push(item);
       end++;
     }
-    if (state.head === 0 && end < state.inheritedEventCount) {
+    if (!state.headerCommitted && end < state.inheritedEventCount) {
       throw new RangeError('Inherited DeepSeek prefix must fit the first journal transaction');
     }
     const summary = {header: state.header, eventCount: end};
@@ -412,8 +465,8 @@ export default class CompactSessionPersistence extends SessionPersistence {
 
   async publish(handle) {
     const state = handle.state;
-    await this.renew(handle);
-    while (state.pending || state.head === 0 || state.log.length > state.acked) {
+    if (!handle.preclaimed) await this.renew(handle);
+    while (state.pending || !state.headerCommitted || state.log.length > state.acked) {
       state.pending ??= await this.makeBatch(state, handle.epoch);
       const {request, end} = state.pending;
       const receipt = await this.client.request('POST', this.path(state.id) + '/events:append',
@@ -422,6 +475,7 @@ export default class CompactSessionPersistence extends SessionPersistence {
         throw new SessionPersistenceCorruptionError('Invalid State API append receipt');
       }
       state.head = receipt.head_seq;
+      state.headerCommitted = true;
       state.acked = end;
       state.pending = undefined;
     }
@@ -520,7 +574,7 @@ export default class CompactSessionPersistence extends SessionPersistence {
   async release(handle) {
     clearInterval(handle.timer);
     try {
-      if (!handle.lost) await this.client.request('POST', this.path(handle.id) + ':heartbeat', {body: {
+      if (!handle.lost && !handle.preclaimed) await this.client.request('POST', this.path(handle.id) + ':heartbeat', {body: {
         lease_epoch: handle.epoch, release: true,
       }});
     } finally {
@@ -530,10 +584,11 @@ export default class CompactSessionPersistence extends SessionPersistence {
     }
   }
 
-  snapshot({id, head, header, eventCount, log}) {
-    const count = eventCount ?? log.length;
-    return {header: structuredClone(header), formatStatus: 'current', eventCount: count,
-      revision: SessionPersistenceRevision(`${id}:${head}:${count}`)};
+  snapshot({id, head, header, eventCount, log, acked}) {
+    const count = eventCount ?? log?.length;
+    const pending = log ? log.length - acked : 0;
+    return {header: structuredClone(header), formatStatus: 'current',
+      ...(count !== undefined && {eventCount: count}), revision: SessionPersistenceRevision(`${id}:${head}:${pending}`)};
   }
 
   async stat(id, options) {
@@ -542,10 +597,7 @@ export default class CompactSessionPersistence extends SessionPersistence {
     const local = this.writers.get(id)?.state;
     if (local?.log) return this.snapshot(local);
     try {
-      const {head_seq: head} = await this.inspect(id, signal);
-      const page = await this.getPage(id, 0, 1, signal);
-      const {header} = await this.readHeader(id, page.events?.[0]);
-      return this.snapshot({id, head, header, eventCount: head - 1});
+      return this.snapshot({id, ...await this.readFirstHeader(id, signal)});
     } catch (error) {
       if (error instanceof SessionPersistenceNotFoundError) return undefined;
       throw error;
@@ -565,17 +617,18 @@ export default class CompactSessionPersistence extends SessionPersistence {
         if (!session.session_id.startsWith(this.prefix) || !session.head_seq) continue;
         const id = session.session_id.slice(this.prefix.length);
         const summary = session.summary_metadata;
-        if (summary?.header && summary.eventCount === session.head_seq - 1) {
+        const hasCount = nonnegative(summary?.eventCount) && summary.eventCount < session.head_seq;
+        if (summary?.header && hasCount) {
           const header = this.verifyHeader(id, summary.header);
           found.set(id, this.snapshot({id, header, head: session.head_seq, eventCount: summary.eventCount}));
         } else {
           // Existing sessions and oversized metadata use a header-only fallback.
-          const page = await this.getPage(id, 0, 1, signal).catch(error => {
+          const metadata = await this.readFirstHeader(id, signal).catch(error => {
             if (!(error instanceof SessionPersistenceNotFoundError)) throw error;
           });
-          if (page) {
-            const {header} = await this.readHeader(id, page.events?.[0]);
-            found.set(id, this.snapshot({id, header, head: session.head_seq, eventCount: session.head_seq - 1}));
+          if (metadata) {
+            found.set(id, this.snapshot({id, ...metadata,
+              eventCount: hasCount && metadata.head === session.head_seq ? summary.eventCount : undefined}));
           }
         }
       }

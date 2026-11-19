@@ -31,6 +31,7 @@ parser.add_argument("--agent-port", type=int, default=29731)
 parser.add_argument("--notes-port", type=int, default=29741)
 parser.add_argument("--runner-port", type=int, default=29750)
 parser.add_argument("--hindsight-url", default="http://127.0.0.1:38888")
+parser.add_argument("--native-psql", type=Path, help="psql for an isolated local dot-pressure database")
 args = parser.parse_args()
 
 runtime = args.runtime.resolve()
@@ -53,7 +54,7 @@ bucket = "ahp-dot-e2e-" + run_id
 database = lane_env["AHP_DB_NAME"]
 dsn = lane_env["AHP_TEST_DATABASE_URL"]
 parts = urlsplit(dsn)
-if parts.hostname != "127.0.0.1" or parts.port != 25495:
+if parts.hostname != "127.0.0.1" or (args.native_psql is None and parts.port != 25495):
     raise SystemExit("unexpected lane database endpoint")
 
 for name in ("certs", "config", "logs", "notes"):
@@ -73,9 +74,15 @@ def run(cmd, **kwargs):
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
 
-check = run(["docker", "exec", "-i", "ahp-handbook-acceptance-pg", "psql", "-X", "-qAt", "-U",
-             parts.username, "--dbname", "postgres", "-v", "ON_ERROR_STOP=1"],
-            input="SELECT 1 FROM pg_database WHERE datname='" + database + "';")
+if args.native_psql is None:
+    check = run(["docker", "exec", "-i", "ahp-handbook-acceptance-pg", "psql", "-X", "-qAt", "-U",
+                 parts.username, "--dbname", "postgres", "-v", "ON_ERROR_STOP=1"],
+                input="SELECT 1 FROM pg_database WHERE datname='" + database + "';")
+else:
+    if not database.startswith("ahp_dot_pressure_") or parts.path != "/" + database:
+        raise SystemExit("native psql requires an isolated ahp_dot_pressure_ database")
+    check = run([str(args.native_psql), "-X", "-qAt", "--dbname", dsn,
+                 "-v", "ON_ERROR_STOP=1"], input="SELECT 1;")
 if check.returncode or not check.stdout.strip():
     raise SystemExit("lane database missing; run the lane preparer first")
 

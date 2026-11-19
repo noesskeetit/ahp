@@ -216,6 +216,7 @@ type server struct {
 	exchangeSigner        *auth.Signer
 	stateOwner            *state.Store
 	stateOwnerAuthorize   transport.Authorize
+	compactStateReady     func(context.Context) error
 	tenantDeletionOwners  map[string]TenantDeletionOwner
 	subjectDeletionOwners map[string]SubjectDeletionOwner
 	pool                  *pgxpool.Pool
@@ -264,6 +265,11 @@ func (s *server) handleReadiness(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"not_ready","reason":"database unreachable"}` + "\n"))
 		return
 	}
+	if s.compactStateReady != nil && s.compactStateReady(ctx) != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"status":"not_ready","reason":"compact State bucket unreachable"}` + "\n"))
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ok"}` + "\n"))
 }
@@ -299,6 +305,11 @@ func (s *server) serveState(ctx context.Context, addr string) error {
 
 	mux := s.baseMux()
 	mux.Handle("/v1/state/", s.withDeletionCascade(stateHandler, st, verifier))
+	stopCompactState, err := s.mountCompactState(ctx, mux, verifier, compactStateClaimsAuthorize)
+	if err != nil {
+		return err
+	}
+	defer stopCompactState()
 
 	handler := aot.HTTPMiddleware("state")(mux)
 	return s.runServer(ctx, "state", addr, handler)
@@ -645,6 +656,11 @@ func (s *server) serveAll(ctx context.Context) error {
 	stateHandler = s.withDeletionCascade(stateHandler, st, verifier, controlConfig)
 	mux.Handle("/v1/state/", stateHandler)
 	mux.Handle("/v1/state-admin/", stateHandler)
+	stopCompactState, err := s.mountCompactState(ctx, mux, verifier, idStore.Authorize)
+	if err != nil {
+		return err
+	}
+	defer stopCompactState()
 	idCfg := identityapi.Config{
 		Auth:     s.authenticator,
 		Store:    idStore,

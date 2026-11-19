@@ -1,4 +1,4 @@
-import type {CompactJournalClient} from './index.mjs';
+import type {CompactJournalClient, TurnLease} from './index.mjs';
 
 export interface DeepSeekSessionHeader {
   readonly version: 4;
@@ -32,11 +32,15 @@ export interface DeepSeekPersistenceOptions {
 export interface DeepSeekSessionSnapshot<H extends DeepSeekSessionHeader = DeepSeekSessionHeader> {
   readonly header: H;
   readonly formatStatus: 'current';
-  readonly eventCount: number;
+  readonly eventCount?: number;
   readonly revision: string;
 }
 export interface DeepSeekOperationOptions { readonly signal?: AbortSignal }
-export interface DeepSeekCreateOptions extends DeepSeekOperationOptions { readonly inheritedEventCount?: number }
+export interface DeepSeekOpenOptions extends DeepSeekOperationOptions {
+  /** The host owns renewal and terminal disposition of this queued turn. */
+  readonly preclaimedTurn?: Pick<TurnLease, 'session_id' | 'epoch' | 'input_seq' | 'head_seq'>;
+}
+export interface DeepSeekCreateOptions extends DeepSeekOpenOptions { readonly inheritedEventCount?: number }
 export type DeepSeekAccess = 'read' | 'write';
 export interface DeepSeekSessionHandle<
   H extends DeepSeekSessionHeader = DeepSeekSessionHeader,
@@ -58,7 +62,7 @@ export interface DeepSeekSessionPersistence<
 > {
   readonly identity: symbol;
   create(header: H, options?: DeepSeekCreateOptions): Promise<DeepSeekSessionHandle<H, E>>;
-  open(id: string, access: DeepSeekAccess, options?: DeepSeekOperationOptions): Promise<DeepSeekSessionHandle<H, E>>;
+  open(id: string, access: DeepSeekAccess, options?: DeepSeekOpenOptions): Promise<DeepSeekSessionHandle<H, E>>;
   stat(id: string, options?: DeepSeekOperationOptions): Promise<DeepSeekSessionSnapshot<H> | undefined>;
   list(options?: DeepSeekOperationOptions): Promise<DeepSeekSessionSnapshot<H>[]>;
   dispatchTool(id: string, callId: string): Promise<string>;
