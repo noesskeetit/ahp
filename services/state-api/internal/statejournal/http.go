@@ -9,12 +9,13 @@ import (
 
 	"github.com/ahp-platform/ahp/pkg/auth"
 	"github.com/ahp-platform/ahp/pkg/contracts"
+	"github.com/ahp-platform/ahp/pkg/contracts/journal"
 	"github.com/ahp-platform/ahp/pkg/transport"
 )
 
 // NewHTTP mounts the journal operations implemented by the compact store.
 func NewHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authorize) (http.Handler, error) {
-	return newHTTP(store, verifier, authorize, nil)
+	return newHTTP(store, verifier, authorize, nil, false)
 }
 
 // NewHTTPWithToolLeases issues proof of lease ownership for the fenced Gateway.
@@ -23,10 +24,17 @@ func NewHTTPWithToolLeases(store *Store, verifier *auth.Verifier, authorize tran
 	if signer == nil {
 		return nil, invalidHTTP("journal tool leases require a signing key")
 	}
-	return newHTTP(store, verifier, authorize, signer)
+	return newHTTP(store, verifier, authorize, signer, false)
 }
 
-func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authorize, signer *auth.Signer) (http.Handler, error) {
+// NewHTTPWithDotsFIFO explicitly enables the additional task-scoped Dots
+// admission and claim routes. An optional signer issues fenced Tool Gateway
+// proof tied to the same verified task that owns the claimed run.
+func NewHTTPWithDotsFIFO(store *Store, verifier *auth.Verifier, authorize transport.Authorize, signer *auth.Signer) (http.Handler, error) {
+	return newHTTP(store, verifier, authorize, signer, true)
+}
+
+func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authorize, signer *auth.Signer, dotsFIFO bool) (http.Handler, error) {
 	if store == nil || verifier == nil || authorize == nil {
 		return nil, invalidHTTP("journal handler requires storage, verification and authorization")
 	}
@@ -62,6 +70,22 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 	mux.HandleFunc("POST /v1/state/sessions:enqueue", jsonRoute(func(r *http.Request, caller transport.Principal, req EnqueueRequest) (any, error) {
 		return store.EnqueueTurn(r.Context(), caller.Scope, req)
 	}))
+	if dotsFIFO {
+		mux.HandleFunc("POST /v1/state/sessions/dots:enqueue", jsonRoute(func(r *http.Request, caller transport.Principal, req journal.DotsEnqueueRequest) (any, error) {
+			return store.EnqueueDotsTurn(r.Context(), caller.Scope, caller.Claims.Task, req)
+		}))
+		mux.HandleFunc("POST /v1/state/sessions/dots:claim-turn", jsonRoute(func(r *http.Request, caller transport.Principal, req claimTurnRequest) (any, error) {
+			turn, err := store.ClaimDotsTurn(r.Context(), caller.Scope, req.SessionID, caller.Claims.Task, duration(req.TTL))
+			if err != nil {
+				return nil, err
+			}
+			proof, err := leaseProof(caller, turn.SessionID, turn.Lease)
+			return struct {
+				journal.DotsTurnLease
+				Proof string `json:"tool_lease_proof,omitempty"`
+			}{turn, proof}, err
+		}))
+	}
 	mux.HandleFunc("POST /v1/state/sessions:claim-turn", jsonRoute(func(r *http.Request, caller transport.Principal, req claimTurnRequest) (any, error) {
 		turn, err := store.ClaimTurn(r.Context(), caller.Scope, req.SessionID, caller.Claims.Task, duration(req.TTL))
 		if err != nil {

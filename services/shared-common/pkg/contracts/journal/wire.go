@@ -183,6 +183,27 @@ type TurnLease struct {
 	HeadSeq   int64   `json:"head_seq"`
 }
 
+// DotsEnqueueRequest is the opt-in Dots FIFO admission. The HTTP owner binds
+// the authenticated task; no task ID or scope is accepted from the body.
+type DotsEnqueueRequest struct {
+	SessionID string  `json:"session_id"`
+	Key       string  `json:"key"`
+	Input     Payload `json:"input"`
+}
+
+type DotsEnqueueReceipt struct {
+	EnqueueReceipt
+	RunID       string `json:"run_id"`
+	RunSequence int64  `json:"run_sequence"`
+}
+
+type DotsTurnLease struct {
+	TurnLease
+	RunID       string `json:"run_id"`
+	RunSequence int64  `json:"run_sequence"`
+	TaskID      string `json:"task_id"`
+}
+
 type TurnStatus struct {
 	Status   string `json:"status"`
 	Epoch    int64  `json:"lease_epoch"`

@@ -50,17 +50,42 @@ func (s *Store) GetTurnStatus(ctx context.Context, scope contracts.Scope, sessio
 // EnqueueTurn commits the input event and its dispatch position together. A
 // retry returns the original receipt regardless of the turn's current status.
 func (s *Store) EnqueueTurn(ctx context.Context, scope contracts.Scope, req EnqueueRequest) (EnqueueReceipt, error) {
+	receipt, err := s.enqueueTurn(ctx, scope, req, "")
+	return receipt.EnqueueReceipt, err
+}
+
+// EnqueueDotsTurn admits a run into an opt-in FIFO without replacing the head
+// or resetting its lease. Only the authenticated task may claim its run.
+func (s *Store) EnqueueDotsTurn(ctx context.Context, scope contracts.Scope, task string, req journal.DotsEnqueueRequest) (journal.DotsEnqueueReceipt, error) {
+	if !validID(task) {
+		return journal.DotsEnqueueReceipt{}, contracts.NewError(contracts.ErrInvalid, "invalid Dots task")
+	}
+	return s.enqueueTurn(ctx, scope, EnqueueRequest{
+		SessionID: req.SessionID, Harness: "dots", FormatVersion: 1, Key: req.Key, Input: req.Input,
+	}, task)
+}
+
+func (s *Store) enqueueTurn(ctx context.Context, scope contracts.Scope, req EnqueueRequest, dotTask string) (journal.DotsEnqueueReceipt, error) {
+	var receipt journal.DotsEnqueueReceipt
 	if err := scope.Validate(); err != nil {
-		return EnqueueReceipt{}, err
+		return receipt, err
 	}
 	if !validID(req.SessionID) || !validID(req.Harness) || !validID(req.Key) ||
 		req.FormatVersion < 1 || req.Input.Blob != nil ||
 		!validPayload(req.Input) || !json.Valid(req.Input.Inline) {
-		return EnqueueReceipt{}, contracts.NewError(contracts.ErrInvalid, "invalid turn admission")
+		return receipt, contracts.NewError(contracts.ErrInvalid, "invalid turn admission")
 	}
-	data, err := json.Marshal(req)
+	dots := dotTask != ""
+	var admission any = req
+	if dots {
+		admission = struct {
+			EnqueueRequest
+			Task string
+		}{req, dotTask}
+	}
+	data, err := json.Marshal(admission)
 	if err != nil {
-		return EnqueueReceipt{}, err
+		return receipt, err
 	}
 	digest := sha256.Sum256(data)
 	keyHash := sha256.Sum256([]byte(req.Key))
@@ -68,16 +93,16 @@ func (s *Store) EnqueueTurn(ctx context.Context, scope contracts.Scope, req Enqu
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return EnqueueReceipt{}, err
+		return receipt, err
 	}
 	defer tx.Rollback(ctx)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO ahp_journal.sessions
-			(tenant_id,session_id,deployment_id,subject_id,harness_type,format_version)
-		VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
-		scope.Tenant, req.SessionID, scope.Deployment, scope.Subject, req.Harness, req.FormatVersion)
+			(tenant_id,session_id,deployment_id,subject_id,harness_type,format_version,dots_fifo)
+		VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
+		scope.Tenant, req.SessionID, scope.Deployment, scope.Subject, req.Harness, req.FormatVersion, dots)
 	if err != nil {
-		return EnqueueReceipt{}, err
+		return receipt, err
 	}
 	var head int64
 	var status string
@@ -86,45 +111,66 @@ func (s *Store) EnqueueTurn(ctx context.Context, scope contracts.Scope, req Enqu
 		SELECT head_seq,status,coalesce(lease_expires_at>clock_timestamp(),false)
 		FROM ahp_journal.sessions
 		WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4
-		  AND harness_type=$5 AND format_version=$6 AND status<>'DELETED'
-		FOR UPDATE`, scope.Tenant, req.SessionID, scope.Deployment, scope.Subject, req.Harness, req.FormatVersion).
+		  AND harness_type=$5 AND format_version=$6 AND dots_fifo=$7 AND status<>'DELETED'
+		FOR UPDATE`, scope.Tenant, req.SessionID, scope.Deployment, scope.Subject, req.Harness, req.FormatVersion, dots).
 		Scan(&head, &status, &hasLease)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return EnqueueReceipt{}, contracts.NewError(contracts.ErrConflict, "session unavailable for admission")
+		return receipt, contracts.NewError(contracts.ErrConflict, "session unavailable for admission")
 	}
 	if err != nil {
-		return EnqueueReceipt{}, err
+		return receipt, err
 	}
-	receipt := EnqueueReceipt{SessionID: req.SessionID}
+	receipt.SessionID = req.SessionID
 	var stored []byte
 	err = tx.QueryRow(ctx, `
-		SELECT result_head_seq,request_digest
+		SELECT result_head_seq,request_digest,coalesce(dots_run_id,''),coalesce(dots_run_sequence,0)
 		FROM ahp_journal.session_events
 		WHERE tenant_id=$1 AND session_id=$2 AND operation_key=$3`,
-		scope.Tenant, req.SessionID, key).Scan(&receipt.HeadSeq, &stored)
+		scope.Tenant, req.SessionID, key).Scan(&receipt.HeadSeq, &stored, &receipt.RunID, &receipt.RunSequence)
 	switch {
 	case err == nil && bytes.Equal(stored, digest[:]):
 		return receipt, nil
 	case err == nil:
-		return EnqueueReceipt{}, contracts.NewError(contracts.ErrKeyReuse, "turn key has a different input")
+		return journal.DotsEnqueueReceipt{}, contracts.NewError(contracts.ErrKeyReuse, "turn key has a different input")
 	case !errors.Is(err, pgx.ErrNoRows):
-		return EnqueueReceipt{}, err
-	case hasLease || (status != SessionIdle && status != SessionWaitingInput):
-		return EnqueueReceipt{}, contracts.NewError(contracts.ErrConflict, "the session already has a turn")
+		return journal.DotsEnqueueReceipt{}, err
+	case !dots && (hasLease || (status != SessionIdle && status != SessionWaitingInput)):
+		return journal.DotsEnqueueReceipt{}, contracts.NewError(contracts.ErrConflict, "the session already has a turn")
+	case dots && status != SessionIdle && status != SessionQueued && status != SessionActive:
+		return journal.DotsEnqueueReceipt{}, contracts.NewError(contracts.ErrConflict, "Dots session unavailable for queueing")
 	}
 
 	receipt.HeadSeq = head + 1
 	event := EventInput{ID: key, Type: "turn.input", Role: "user", Codec: "json", Payload: req.Input}
 	if err := insertEvent(ctx, tx, scope.Tenant, req.SessionID, receipt.HeadSeq, event, key, digest[:], receipt.HeadSeq); err != nil {
-		return EnqueueReceipt{}, err
+		return journal.DotsEnqueueReceipt{}, err
 	}
-	_, err = tx.Exec(ctx, `
-		UPDATE ahp_journal.sessions
-		SET head_seq=$3,turn_input_seq=$3,status='QUEUED',queued_at=clock_timestamp(),updated_at=clock_timestamp(),
-		    lease_owner=NULL,lease_expires_at=NULL
-		WHERE tenant_id=$1 AND session_id=$2`, scope.Tenant, req.SessionID, receipt.HeadSeq)
+	if dots {
+		receipt.RunID = contracts.NewID()
+		err = tx.QueryRow(ctx, `
+			WITH advanced AS (
+				UPDATE ahp_journal.sessions
+				SET head_seq=$3,dots_run_sequence=dots_run_sequence+1,updated_at=clock_timestamp(),
+				    status=CASE WHEN turn_input_seq IS NULL THEN 'QUEUED' ELSE status END,
+				    queued_at=coalesce(queued_at,clock_timestamp()),turn_input_seq=coalesce(turn_input_seq,$3)
+				WHERE tenant_id=$1 AND session_id=$2
+				RETURNING dots_run_sequence
+			)
+			UPDATE ahp_journal.session_events e
+			SET dots_run_id=$4,dots_task_id=$5,dots_run_sequence=advanced.dots_run_sequence
+			FROM advanced
+			WHERE e.tenant_id=$1 AND e.session_id=$2 AND e.seq=$3
+			RETURNING e.dots_run_sequence`,
+			scope.Tenant, req.SessionID, receipt.HeadSeq, receipt.RunID, dotTask).Scan(&receipt.RunSequence)
+	} else {
+		_, err = tx.Exec(ctx, `
+			UPDATE ahp_journal.sessions
+			SET head_seq=$3,turn_input_seq=$3,status='QUEUED',queued_at=clock_timestamp(),updated_at=clock_timestamp(),
+			    lease_owner=NULL,lease_expires_at=NULL
+			WHERE tenant_id=$1 AND session_id=$2`, scope.Tenant, req.SessionID, receipt.HeadSeq)
+	}
 	if err != nil {
-		return EnqueueReceipt{}, err
+		return journal.DotsEnqueueReceipt{}, err
 	}
 	return receipt, tx.Commit(ctx)
 }
@@ -132,7 +178,18 @@ func (s *Store) EnqueueTurn(ctx context.Context, scope contracts.Scope, req Enqu
 // ClaimTurn takes a specific turn or the next ready turn for the authorised
 // scope. A queued input survives lease turnover and is returned on every claim.
 func (s *Store) ClaimTurn(ctx context.Context, scope contracts.Scope, session, worker string, ttl time.Duration) (TurnLease, error) {
-	var turn TurnLease
+	turn, err := s.claimTurn(ctx, scope, session, worker, ttl, false)
+	return turn.TurnLease, err
+}
+
+// ClaimDotsTurn takes a Dots FIFO head bound to the verified task. Workload-only
+// dispatch and minting a run's task token belong to a separate access path.
+func (s *Store) ClaimDotsTurn(ctx context.Context, scope contracts.Scope, session, task string, ttl time.Duration) (journal.DotsTurnLease, error) {
+	return s.claimTurn(ctx, scope, session, task, ttl, true)
+}
+
+func (s *Store) claimTurn(ctx context.Context, scope contracts.Scope, session, worker string, ttl time.Duration, dots bool) (journal.DotsTurnLease, error) {
+	var turn journal.DotsTurnLease
 	if err := scope.Validate(); err != nil {
 		return turn, err
 	}
@@ -141,13 +198,18 @@ func (s *Store) ClaimTurn(ctx context.Context, scope contracts.Scope, session, w
 	}
 	err := s.pool.QueryRow(ctx, `
 		WITH ready AS MATERIALIZED (
-			SELECT tenant_id,session_id FROM ahp_journal.sessions
-			WHERE tenant_id=$1 AND deployment_id=$2 AND subject_id=$3
-			  AND ($4='' OR session_id=$4)
-			  AND (status='QUEUED' OR (status='ACTIVE' AND turn_input_seq IS NOT NULL
-				 AND lease_expires_at<=statement_timestamp()))
-			ORDER BY queued_at,session_id
-			LIMIT 1 FOR UPDATE SKIP LOCKED
+			SELECT s.tenant_id,s.session_id FROM ahp_journal.sessions s
+			WHERE s.tenant_id=$1 AND s.deployment_id=$2 AND s.subject_id=$3
+			  AND ($4='' OR s.session_id=$4) AND s.dots_fifo=$7
+			  AND (s.status='QUEUED' OR (s.status='ACTIVE' AND s.turn_input_seq IS NOT NULL
+				 AND s.lease_expires_at<=statement_timestamp()))
+			  AND (NOT $7 OR EXISTS (
+				SELECT 1 FROM ahp_journal.session_events e
+				WHERE e.tenant_id=s.tenant_id AND e.session_id=s.session_id AND e.seq=s.turn_input_seq
+				  AND e.dots_task_id=$5 AND e.dots_closed_at IS NULL
+			  ))
+			ORDER BY s.queued_at,s.session_id
+			LIMIT 1 FOR UPDATE OF s SKIP LOCKED
 		), claimed AS (
 			UPDATE ahp_journal.sessions AS s
 			SET status='ACTIVE',lease_epoch=s.lease_epoch+1,lease_owner=$5,
@@ -157,12 +219,12 @@ func (s *Store) ClaimTurn(ctx context.Context, scope contracts.Scope, session, w
 			RETURNING s.tenant_id,s.session_id,s.lease_owner,s.lease_epoch,s.lease_expires_at,s.turn_input_seq,s.head_seq
 		)
 		SELECT c.session_id,c.lease_owner,c.lease_epoch,c.lease_expires_at,c.turn_input_seq,c.head_seq,
-		       e.inline_payload,e.blob_ref
+		       e.inline_payload,e.blob_ref,coalesce(e.dots_run_id,''),coalesce(e.dots_run_sequence,0),coalesce(e.dots_task_id,'')
 		FROM claimed c JOIN ahp_journal.session_events e
 		  ON (e.tenant_id,e.session_id,e.seq)=(c.tenant_id,c.session_id,c.turn_input_seq)`,
-		scope.Tenant, scope.Deployment, scope.Subject, session, worker, ttl.Microseconds()).
-		Scan(&turn.SessionID, &turn.Worker, &turn.Epoch, &turn.ExpiresAt,
-			&turn.InputSeq, &turn.HeadSeq, &turn.Input.Inline, &turn.Input.Blob)
+		scope.Tenant, scope.Deployment, scope.Subject, session, worker, ttl.Microseconds(), dots).
+		Scan(&turn.SessionID, &turn.Worker, &turn.Epoch, &turn.ExpiresAt, &turn.InputSeq, &turn.HeadSeq,
+			&turn.Input.Inline, &turn.Input.Blob, &turn.RunID, &turn.RunSequence, &turn.TaskID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = contracts.NewError(contracts.ErrNotFound, "no turn ready")
 	}
@@ -171,17 +233,34 @@ func (s *Store) ClaimTurn(ctx context.Context, scope contracts.Scope, session, w
 
 func finishTurn(ctx context.Context, tx pgx.Tx, scope contracts.Scope, session, status string) error {
 	tag, err := tx.Exec(ctx, `
-		UPDATE ahp_journal.sessions
-		SET status=$3,turn_input_seq=NULL,queued_at=NULL,lease_owner=NULL,lease_expires_at=NULL
-		WHERE tenant_id=$1 AND session_id=$2 AND status='ACTIVE' AND turn_input_seq IS NOT NULL`,
-		scope.Tenant, session, status)
+		WITH finished AS (
+			UPDATE ahp_journal.session_events e
+			SET dots_closed_at=clock_timestamp()
+			FROM ahp_journal.sessions s
+			WHERE (e.tenant_id,e.session_id,e.seq)=(s.tenant_id,s.session_id,s.turn_input_seq)
+			  AND s.tenant_id=$1 AND s.session_id=$2 AND s.dots_fifo AND s.status='ACTIVE'
+			  AND $3='IDLE' AND e.dots_run_sequence IS NOT NULL AND e.dots_closed_at IS NULL
+			RETURNING e.dots_run_sequence
+		), next_turn AS (
+			SELECT e.seq,e.created_at FROM ahp_journal.session_events e CROSS JOIN finished f
+			WHERE e.tenant_id=$1 AND e.session_id=$2 AND e.dots_run_sequence>f.dots_run_sequence
+			  AND e.dots_closed_at IS NULL
+			ORDER BY e.dots_run_sequence LIMIT 1
+		)
+		UPDATE ahp_journal.sessions s
+		SET status=CASE WHEN EXISTS (SELECT 1 FROM next_turn) THEN 'QUEUED' ELSE $3 END,
+		    turn_input_seq=(SELECT seq FROM next_turn),queued_at=(SELECT created_at FROM next_turn),
+		    lease_owner=NULL,lease_expires_at=NULL
+		WHERE tenant_id=$1 AND session_id=$2 AND status='ACTIVE' AND turn_input_seq IS NOT NULL
+		  AND (NOT s.dots_fifo OR EXISTS (SELECT 1 FROM finished))`, scope.Tenant, session, status)
 	if err == nil && tag.RowsAffected() != 1 {
 		return contracts.NewError(contracts.ErrConflict, "session has no active turn to finish")
 	}
 	return err
 }
 
-// RequeueExpiredTurns restores expired claims to the durable worker queue.
+// RequeueExpiredTurns restores expired native claims to the durable worker queue.
+// Dots claims recover their own expired FIFO head.
 // It preserves the accepted input and never executes an external action.
 func (s *Store) RequeueExpiredTurns(ctx context.Context, tenant string, batch int) (int64, error) {
 	if !validID(tenant) || batch < 1 || batch > 1000 {
@@ -190,7 +269,7 @@ func (s *Store) RequeueExpiredTurns(ctx context.Context, tenant string, batch in
 	tag, err := s.pool.Exec(ctx, `
 		WITH expired AS (
 			SELECT tenant_id,session_id FROM ahp_journal.sessions
-			WHERE tenant_id=$1 AND status='ACTIVE' AND turn_input_seq IS NOT NULL
+			WHERE tenant_id=$1 AND status='ACTIVE' AND turn_input_seq IS NOT NULL AND NOT dots_fifo
 			  AND lease_expires_at<=statement_timestamp()
 			ORDER BY lease_expires_at,session_id LIMIT $2 FOR UPDATE SKIP LOCKED
 		)

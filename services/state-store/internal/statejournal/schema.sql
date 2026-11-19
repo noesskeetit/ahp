@@ -117,6 +117,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS session_events_operation_key
     ON ahp_journal.session_events (tenant_id, session_id, operation_key)
     WHERE operation_key IS NOT NULL;
 
+-- The FIFO projection is opt-in for newly admitted Dots sessions. Native
+-- session rows and their immutable event payloads need no backfill.
+ALTER TABLE ahp_journal.sessions
+    ADD COLUMN IF NOT EXISTS dots_fifo boolean NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS dots_run_sequence bigint NOT NULL DEFAULT 0;
+
+ALTER TABLE ahp_journal.session_events
+    ADD COLUMN IF NOT EXISTS dots_run_id text,
+    ADD COLUMN IF NOT EXISTS dots_run_sequence bigint,
+    ADD COLUMN IF NOT EXISTS dots_task_id text,
+    ADD COLUMN IF NOT EXISTS dots_closed_at timestamptz;
+
+CREATE UNIQUE INDEX IF NOT EXISTS dots_run_order_idx
+    ON ahp_journal.session_events (tenant_id, session_id, dots_run_sequence)
+    WHERE dots_run_sequence IS NOT NULL;
+
 ALTER TABLE ahp_journal.session_events
     ADD COLUMN IF NOT EXISTS is_active boolean NOT NULL DEFAULT true,
     ADD COLUMN IF NOT EXISTS is_compacted boolean NOT NULL DEFAULT false,

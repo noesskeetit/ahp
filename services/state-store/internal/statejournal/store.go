@@ -63,7 +63,7 @@ func (s *Store) CreateSession(ctx context.Context, scope contracts.Scope, sessio
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (tenant_id, session_id) DO UPDATE SET session_id=EXCLUDED.session_id
 		WHERE stored.deployment_id=EXCLUDED.deployment_id AND stored.subject_id=EXCLUDED.subject_id
-		  AND stored.harness_type=EXCLUDED.harness_type AND stored.format_version=EXCLUDED.format_version
+		  AND stored.harness_type=EXCLUDED.harness_type AND stored.format_version=EXCLUDED.format_version AND NOT stored.dots_fifo
 		  AND stored.status <> 'DELETED'`, scope.Tenant, session, scope.Deployment, scope.Subject, harness, version)
 	if err == nil && tag.RowsAffected() == 0 {
 		return contracts.NewError(contracts.ErrConflict, "session identifier unavailable")
@@ -91,7 +91,7 @@ func (s *Store) AcquireOrCreateSession(ctx context.Context, scope contracts.Scop
 		SET status='ACTIVE', lease_owner=EXCLUDED.lease_owner, lease_epoch=stored.lease_epoch+1,
 		    lease_expires_at=clock_timestamp()+$8*interval '1 microsecond'
 		WHERE stored.deployment_id=EXCLUDED.deployment_id AND stored.subject_id=EXCLUDED.subject_id
-		  AND stored.harness_type=EXCLUDED.harness_type AND stored.format_version=EXCLUDED.format_version
+		  AND stored.harness_type=EXCLUDED.harness_type AND stored.format_version=EXCLUDED.format_version AND NOT stored.dots_fifo
 		  AND stored.status<>'DELETED' AND stored.turn_input_seq IS NULL
 		  AND (stored.lease_expires_at IS NULL OR stored.lease_expires_at<=clock_timestamp())
 		RETURNING lease_owner, lease_epoch, lease_expires_at`,
@@ -116,7 +116,7 @@ func (s *Store) AcquireSession(ctx context.Context, scope contracts.Scope, sessi
 		SET status='ACTIVE', lease_owner=$5, lease_epoch=lease_epoch+1,
 		    lease_expires_at=clock_timestamp()+$6*interval '1 microsecond'
 		WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4
-		  AND status <> 'DELETED' AND turn_input_seq IS NULL
+		  AND status <> 'DELETED' AND turn_input_seq IS NULL AND NOT dots_fifo
 		  AND (lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp())
 		RETURNING lease_owner, lease_epoch, lease_expires_at`,
 		scope.Tenant, session, scope.Deployment, scope.Subject, worker, ttl.Microseconds()).
