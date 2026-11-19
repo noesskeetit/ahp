@@ -1,150 +1,49 @@
 # AHP Go Platform
 
-Fresh implementation of the AHP (Agentic Host Platform) — Go backend, separated service roles, PostgreSQL/pgvector, Redis, MinIO, Vault.
+Весь код платформы собран в одном репозитории. Исходники разложены по папкам в [`services/`](services/). В [`platform/`](platform/) лежат общие файлы сборки, Compose, интеграционные тесты и документация.
+
+Снимок исходного кода соответствует ревизии AHP `68a169b4`.
 
 ## Посервисный каталог
 
-Все компоненты находятся в этом репозитории. Команды сборки и запуска приведены в [Quick Start](#quick-start).
-
 | Компонент | Где открыть код |
 |---|---|
-| **Новый State Store** | [Хранилище](internal/statejournal) · [схема PostgreSQL](internal/statejournal/schema.sql) |
-| **Новый State API** | [Точка входа](cmd/state-api) · [HTTP API](internal/statejournal/http.go) · [запуск и настройка](docs/compact-state-service.md) |
-| **Адаптеры харнессов** | [LangGraph](sdk/python/ahp_state/journal_checkpointer.py) · [ADK](sdk/python/ahp_state/journal_adk.py) · [DeepSeek](adapters/deepseek) · [Hermes](adapters/hermes) · [OpenClaw](adapters/openclaw) · [проверки восстановления](profiling/state-journal) |
-| State API для thread/run | [HTTP API](internal/stateapi) · [хранилище](internal/state) |
-| Identity | [Сервис](internal/identity) · [HTTP API](internal/identityapi) |
-| Model Gateway | [Маршрутизация и провайдеры](internal/model) · [HTTP API](internal/modelapi) |
-| Tool Gateway | [Инструменты и журнал операций](internal/tools) |
-| Artifacts | [Хранилище](internal/artifacts) · [HTTP API](internal/artifactsapi) · [парсер](cmd/artifact-parser) |
-| Memory | [Сервис памяти](internal/memory) · [настройка](infra/memory) |
-| Workspace | [Управление рабочими каталогами](internal/workspace) |
-| Compute | [Управление вычислениями и песочницами](internal/compute) · [compute host](cmd/compute-host) |
-| Registry | [Деплойменты и регистрация агентов](internal/registry) |
-| Execution и A2A | [Исполнение](internal/executor) · [A2A gateway](internal/gateway) · [связь с раннерами](internal/execbridge) |
-| Triggers | [Задания по расписанию и событиям](internal/triggers) |
-| Evals | [Оценка агентов](internal/evals) |
-| Agents Space | [Серверная логика](internal/space) · [раннер](cmd/as-runner) |
-| Agent Runtime | [Агент](cmd/ahp-agent) · [образ](infra/agent-workload) · [интеграция Emil](adapters/emil) |
-| SDK | [Go](sdk/go) · [Python](sdk/python) · [TypeScript](sdk/ts) · [примеры](sdk/examples) |
-| Frontend | [Интерфейс](web/aifactory) |
-| Общие библиотеки и запуск платформы | [Контракты и библиотеки](pkg) · [процесс ahp](cmd/ahp) |
-| Deploy и интеграция | [Контроллер деплоя](internal/deploycontroller) · [манифесты](infra/manifests) · [Compose](compose.yaml) · [тесты](tests) |
+| **Новый State Store** | [Хранилище](services/state-store/internal/statejournal) · [схема PostgreSQL](services/state-store/internal/statejournal/schema.sql) |
+| **Новый State API** | [Точка входа](services/state-api/cmd/state-api) · [HTTP API](services/state-api/internal/statejournal/http.go) · [запуск и настройка](services/state-api/docs/compact-state-service.md) |
+| **Адаптеры харнессов** | [LangGraph](services/harness-adapters/sdk/python/ahp_state/journal_checkpointer.py) · [ADK](services/harness-adapters/sdk/python/ahp_state/journal_adk.py) · [DeepSeek](services/harness-adapters/adapters/deepseek) · [Hermes](services/harness-adapters/adapters/hermes) · [OpenClaw](services/harness-adapters/adapters/openclaw) · [проверки восстановления](services/harness-adapters/profiling/state-journal) |
+| State API для thread/run | [HTTP API](services/state-service/internal/stateapi) · [хранилище](services/state-service/internal/state) |
+| Identity | [Сервис](services/identity-service/internal/identity) · [HTTP API](services/identity-service/internal/identityapi) |
+| Model Gateway | [Маршрутизация и провайдеры](services/model-gateway/internal/model) · [HTTP API](services/model-gateway/internal/modelapi) |
+| Tool Gateway | [Инструменты и журнал операций](services/tool-gateway/internal/tools) |
+| Artifacts | [Хранилище](services/artifacts-service/internal/artifacts) · [HTTP API](services/artifacts-service/internal/artifactsapi) · [парсер](services/artifacts-service/cmd/artifact-parser) |
+| Memory | [Сервис памяти](services/memory-service/internal/memory) · [настройка](services/memory-service/infra/memory) |
+| Workspace | [Управление рабочими каталогами](services/workspace-service/internal/workspace) |
+| Compute | [Управление вычислениями и песочницами](services/compute-service/internal/compute) · [compute host](services/compute-service/cmd/compute-host) |
+| Registry | [Деплойменты и регистрация агентов](services/registry-service/internal/registry) |
+| Execution и A2A | [Исполнение](services/execution-service/internal/executor) · [A2A gateway](services/execution-service/internal/gateway) · [связь с раннерами](services/execution-service/internal/execbridge) |
+| Triggers | [Задания по расписанию и событиям](services/triggers-service/internal/triggers) |
+| Evals | [Оценка агентов](services/evals-service/internal/evals) |
+| Agents Space | [Серверная логика](services/agents-space/internal/space) · [раннер](services/platform-runtime/cmd/as-runner) |
+| Agent Runtime | [Агент](services/agent-runtime/cmd/ahp-agent) · [образ](services/agent-runtime/infra/agent-workload) · [интеграция Emil](services/execution-service/adapters/emil) |
+| SDK | [Go](services/sdk/sdk/go) · [Python](services/sdk/sdk/python) · [TypeScript](services/sdk/sdk/ts) · [примеры](services/sdk/sdk/examples) |
+| Frontend | [Интерфейс](services/frontend/web/aifactory) |
+| Общие библиотеки и запуск платформы | [Контракты и библиотеки](services/shared-common/pkg) · [процесс ahp](services/platform-runtime/cmd/ahp) |
+| Deploy и интеграция | [Контроллер деплоя](services/deploy/internal/deploycontroller) · [манифесты](services/deploy/infra/manifests) · [Compose](platform/compose.yaml) · [тесты](platform/tests) |
 
-## Requirements
+## Сборка из одного клона
 
-- Go 1.26+
-- Docker + Docker Compose (infra containers)
-- Node 22+ (test/run scripts)
-
-## Quick Start
+Для подготовки дерева нужны Git и Python 3.9+. Для сборки бинарников нужен Go 1.26+.
 
 ```bash
-# 1. Copy env template and fill in credentials
-cp .env.example .env
-
-# 2. Start infrastructure (PostgreSQL, Redis, MinIO, Vault)
-npm run infra:up
-
-# 3. Build the application binary
-go build -o bin/ahp ./cmd/ahp
-
-# 4. Run all roles (dev mode, single port)
-npm run service:run
-
-# 5. Quick HTTP smoke check (in another terminal)
-npm run smoke
+git clone https://github.com/noesskeetit/ahp.git
+cd ahp
+python3 assemble.py .build/ahp
+cd .build/ahp
+go build ./cmd/...
 ```
 
-## Service Roles
+`assemble.py` берёт файлы из папок сервисов и `platform/` и собирает локальное дерево Go-модуля. Так сохраняются пути импортов, Docker-контексты и границы пакетов. Каталог назначения должен быть новым. Подготовка дерева выполняется локально.
 
-The `ahp` binary runs one of: `state`, `identity`, `model`, or `all`.
+Дальнейшие команды приведены в [руководстве платформы](platform/README.md) и [инструкции State API](services/state-api/docs/compact-state-service.md). Выполняй их из собранного дерева.
 
-| Role | Port (dev) | Purpose |
-|------|-----------|---------|
-| state | 8081 | Thread/Run/Checkpoint/KV State API |
-| identity | 8082 | Grants, tokens, authorization |
-| model | 8083 | Budget management, model gateway |
-| all | 8080 | Development co-location |
-
-### Single Role
-
-```bash
-./bin/ahp --role state --listen :8081
-```
-
-### With TLS (mTLS)
-
-```bash
-npm run certs:generate
-./bin/ahp --role state --listen :8081 \
-  --tls-cert infra/certs/server.pem \
-  --tls-key infra/certs/server-key.pem \
-  --tls-ca infra/certs/ca.pem
-```
-
-## Docker Compose
-
-```bash
-# Build app image
-npm run app:build
-
-# Start app services alongside infra
-npm run app:up
-
-# Stop app
-npm run app:down
-```
-
-App ports: state 18081, identity 18082, model 18083, all-in-one 18080.
-
-## Testing
-
-```bash
-# Unit + vet (requires running infra)
-npm run check
-
-# HTTP liveness (requires running service)
-npm run smoke
-
-# E2E conformance (requires running service)
-npm run test:e2e
-
-# Chaos: SIGKILL restart, graceful shutdown
-npm run test:chaos
-
-# Load: latency, RSS, checkpoint throughput
-npm run test:load
-```
-
-## Observability
-
-OpenTelemetry tracing is built in. Set:
-
-```bash
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
-export OTEL_EXPORTER_OTLP_INSECURE=true
-```
-
-Without an endpoint, traces are written as JSON to stderr (offline/development mode).
-
-## Deployment Manifests
-
-- **Tier 0**: Docker Compose (this repo)
-- **Tier 1**: systemd units — `infra/manifests/tier1/`
-- **Tier 2A**: Kubernetes base — `infra/manifests/tier2a/`
-- **Tier 2B**: HA production — `infra/manifests/tier2b/` (HPA, NetworkPolicy, PDB, RBAC)
-
-## Architecture
-
-See `docs/implementation.md` for the full task breakdown, `docs/coverage.md` for the requirements-to-evidence matrix, `docs/acceptance-pack.md` for the consolidated delivery acceptance pack (per-criterion evidence + explicit open gates), and `docs/progress.md` for the running log.
-
-## Environment Variables
-
-| Variable | Purpose |
-|----------|---------|
-| `AHP_DATABASE_URL` | PostgreSQL connection string |
-| `AHP_ROLE` | Service role (state/identity/model/all) |
-| `AHP_LISTEN` | Listen address |
-| `AHP_TLS_CERT` / `AHP_TLS_KEY` / `AHP_TLS_CA` | mTLS files |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP gRPC collector |
-| `AHP_VERBOSE` | Debug logging (1=on) |
+Секреты для локального запуска задаются через `.env` или внешнее хранилище. [Шаблон переменных окружения](platform/.env.example).

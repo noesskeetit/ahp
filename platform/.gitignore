@@ -1,0 +1,48 @@
+# Secrets and local environment material.
+.env
+.env.*
+!.env.example
+
+# Agent/orchestrator local state.
+.orchestration/
+
+# Local runtime data.
+.local/
+
+# Build output.
+bin/
+
+# Root-level Go build outputs: `go build ./cmd/<name>` with no -o writes ./<name>
+# into the repository root. Tracking any of them makes a plain build dirty the
+# tree, and a dirty tree stamps every primary log taken from it
+# (DEF-LANE-TRACKED-BINARY: an ELF `ahp` was tracked since fd064a26, and
+# `go build ./cmd/ahp/` overwrote it). Product builds must go through
+# scripts/build-product.sh, which builds into bin/ and attests the VCS stamp.
+/ahp
+/ahp-agent
+/ahp-deploy
+/ahp-note-mcp
+/artifact-parser
+/as-runner
+/compute-host
+/state-consumer
+/state-stand
+/synthetic-authority
+
+# Coverage reports.
+coverage/
+
+# Generated dev TLS certificates.
+infra/certs/
+
+# Delivery evidence + service runtime artifacts (local, never committed).
+.ahp-evidence/
+
+# Local Go build cache for this worktree.
+.gocache/
+
+# Identity contractor local env.
+.env.identity
+
+# Candidate build artifacts (provenance manifest + binaries).
+build-out/
