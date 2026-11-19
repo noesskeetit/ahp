@@ -380,8 +380,7 @@ export default class CompactSessionPersistence extends SessionPersistence {
     const summary = {header: state.header, eventCount: end};
     // Large native headers remain in the journal; the catalog has a 4 KiB cap.
     if (Buffer.byteLength(JSON.stringify(summary, null, 1)) > 4000) delete summary.header;
-    const catalog = {native_key: state.id, summary_metadata: summary,
-      ...(state.header.parentSession && {parent_session_id: this.sessionId(state.header.parentSession)})};
+    const catalog = {native_key: state.id, summary_metadata: summary};
     const request = {lease_epoch: epoch, key: `dsh:append:${state.head}`,
       expected_seq: state.head, events: rows, catalog};
     const intents = [];

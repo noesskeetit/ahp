@@ -284,8 +284,13 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 		if err != nil || offset < 0 || offset > 10000 {
 			return nil, invalidHTTP("invalid KV offset")
 		}
+		keys := query["key"]
+		if len(keys) == 1 && keys[0] == "" {
+			// Preserve the legacy single empty query parameter as no filter.
+			keys = nil
+		}
 		return store.ListKV(r.Context(), caller.Scope, KVQuery{
-			Session: query.Get("session_id"), ScopeType: scopeType, Namespace: query.Get("namespace"), Keys: query["key"],
+			Session: query.Get("session_id"), ScopeType: scopeType, Namespace: query.Get("namespace"), Keys: keys,
 			Prefix: query.Get("prefix") == "true", Limit: int(limit), Offset: int(offset),
 		})
 	}))

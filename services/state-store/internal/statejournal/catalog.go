@@ -82,7 +82,7 @@ func updateCatalog(ctx context.Context, tx pgx.Tx, scope contracts.Scope, sessio
             updated_at=clock_timestamp()
         WHERE tenant_id=$1 AND session_id=$2
           AND ($7::jsonb IS NULL OR octet_length(($7::jsonb)::text)<=4096)
-          AND ($8::text IS NULL OR $8='' OR EXISTS (
+          AND ($8::text IS NULL OR $8='' OR $8=child.parent_session_id OR EXISTS (
               SELECT 1 FROM ahp_journal.sessions parent
               WHERE parent.tenant_id=child.tenant_id AND parent.session_id=$8
                 AND parent.deployment_id=child.deployment_id AND parent.subject_id=child.subject_id

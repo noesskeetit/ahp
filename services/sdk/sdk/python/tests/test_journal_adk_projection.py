@@ -131,3 +131,18 @@ async def test_adk_durable_native_pause_then_resumes_under_new_epoch():
     ))
     with pytest.raises(StateValidationError, match="no unanswered native input"):
         await journal.pause_for_input(session_id=session.id, invocation_id="turn")
+
+
+async def test_adk_accepts_explicit_none_epoch_for_a_cold_read():
+    transport = ADKTransport()
+    identity = {"app_name": "my-app", "user_id": "user"}
+    writer = AHPJournalSessionService(transport, **identity)
+    session = await writer.create_session(**identity, session_id="cold", state={"count": 1})
+    await writer.append_event(session, Event(id="stored", author="model"))
+
+    reader = AHPJournalSessionService(transport, **identity, session_id=session.id, lease_epoch=None)
+    transport.calls.clear()
+    restored = await reader.get_session(**identity, session_id=session.id)
+    assert (restored.state, [event.id for event in restored.events]) == ({"count": 1}, ["stored"])
+    assert [call[0] for call in transport.calls] == ["GET"]
+    assert reader._projection is None

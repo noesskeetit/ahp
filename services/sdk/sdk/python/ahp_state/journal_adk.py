@@ -92,7 +92,7 @@ class AHPJournalSessionService(BaseSessionService):
         self.app_name = app_name
         self.user_id = user_id
         self.session_id = session_id
-        self.lease_epoch = lease_epoch
+        self.lease_epoch = 0 if lease_epoch is None else lease_epoch
         self.path = f"{API}/sessions/{quote(session_id, safe='')}" if session_id is not None else ""
         self.lock = asyncio.Lock()
         self._bindings = {}
@@ -106,7 +106,7 @@ class AHPJournalSessionService(BaseSessionService):
                 raise StateValidationError("INVALID_ARGUMENT", "duplicate managed ADK tool")
             self.effect_tools[tool.name] = tool
         self.tool_gateway = tool_gateway
-        self.tool_guard = StandaloneToolGuard(client, self.path, lease_epoch)
+        self.tool_guard = StandaloneToolGuard(client, self.path, self.lease_epoch)
         self._receipts = {}
 
     @staticmethod

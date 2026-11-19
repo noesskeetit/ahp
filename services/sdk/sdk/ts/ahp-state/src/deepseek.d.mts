@@ -17,7 +17,7 @@ export interface DeepSeekSessionEvent {
   readonly type: string;
   readonly data: unknown;
   readonly ignorable?: true;
-  readonly surfaceOp?: string;
+  readonly surfaceOp?: 'append' | {readonly op: 'replace'; readonly startSeq: number; readonly endSeq: number};
   readonly sourceEventSeqs?: readonly number[];
 }
 export type ToolGateway = (operation: 'Call' | 'Get' | 'GetResult', body: object) => Promise<unknown>;

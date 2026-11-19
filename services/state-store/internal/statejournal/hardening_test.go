@@ -77,6 +77,14 @@ func TestBatchCheckpointTuplesAndCatalog(t *testing.T) {
 			catalog.Sessions[0].ParentSessionID == nil || *catalog.Sessions[0].ParentSessionID != parent {
 			t.Fatalf("generic catalog: %+v %v", catalog, err)
 		}
+		if err := store.DeleteSession(ctx, scope, parent); err != nil {
+			t.Fatal(err)
+		}
+		title = "Child after parent deletion"
+		if _, err := store.MutateKV(ctx, scope, session, lease, false, KVBatch{Key: "rename-child",
+			Catalog: &OpenClawCatalogUpdate{Title: &title, ParentSessionID: &parent}}); err != nil {
+			t.Fatalf("retaining established lineage after parent deletion: %v", err)
+		}
 		for _, id := range []string{"a", "b", "c"} {
 			meta := json.RawMessage(`{"source":"loop"}`)
 			if id == "b" {

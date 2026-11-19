@@ -227,10 +227,11 @@ class AHPJournalClient:
         return await self._mutate(suffix, {"namespace": namespace, "writes": writes})
 
     async def get_kv(self, namespace, *, scope_type="session", key="", prefix=False, offset=0, limit=100):
-        return await self._client.request_state("GET", _API + "/kv", params={
-            "session_id": self.session_id, "scope_type": scope_type, "namespace": namespace,
-            "key": key, "prefix": str(prefix).lower(), "offset": offset, "limit": limit,
-        })
+        params = {"session_id": self.session_id, "scope_type": scope_type, "namespace": namespace,
+                  "prefix": str(prefix).lower(), "offset": offset, "limit": limit}
+        if key:
+            params["key"] = key
+        return await self._client.request_state("GET", _API + "/kv", params=params)
 
     async def mutate_kv(self, operation_key, changes, *, expected_seq=None, catalog=None):
         body = {"session_id": self.session_id, "key": operation_key, "kv": changes}

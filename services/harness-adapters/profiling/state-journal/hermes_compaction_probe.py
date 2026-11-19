@@ -28,6 +28,23 @@ REWRITTEN_TEXT = "[CONTEXT COMPACTION] summary of the earlier turns\n\nkeep this
 MERGED_SUMMARY = "[CONTEXT COMPACTION] shortened context"
 
 
+def assert_preserved_prefix(before, after):
+    committed = after[:len(before)]
+    marker = json.loads(b64decode(after[len(before)]["payload"]["inline"]))
+    changed = set(marker["archived"]) | set(marker["rewound"])
+    assert not set(marker["archived"]) & set(marker["rewound"])
+    assert len(committed) == len(before)
+    for previous, current in zip(before, committed, strict=True):
+        assert ({k: v for k, v in current.items() if k not in {"is_active", "is_compacted"}} ==
+                {k: v for k, v in previous.items() if k not in {"is_active", "is_compacted"}})
+        seq = previous["seq"]
+        if seq in changed:
+            assert previous["is_active"] and not current["is_active"]
+            assert current["is_compacted"] == (seq in marker["archived"])
+        else:
+            assert current == previous
+
+
 def compact(request, session, epoch):
     repo = JournalMessages(request, session, lease_epoch=epoch, holder=HOLDER)
     source = [NewMessage(role, text, timestamp=ts, message_uid=uid) for role, text, ts, uid in (
@@ -62,7 +79,7 @@ def compact(request, session, epoch):
                           row.as_openai_message() for row in rows])
     assert len(attempts) == 2 and attempts[0] == attempts[1]
     after = request("GET", repo.route)["events"]
-    assert after[:len(before)] == before
+    assert_preserved_prefix(before, after)
     assert sum(event["type"] == "hermes.compaction" for event in after) == 1
     assert [row.content for row in repo.read_conversation(session)] == EXPECTED
     assert [msg["_row_id"] for msg in replacement] == [7, 8, 9]
@@ -100,7 +117,7 @@ def publish_rewritten_carry(request, session):
                       watermark=1, lock_holder=HOLDER, tail_count=1, held_for_cas=[original])
     assert (merged["_row_id"], merged["message_uid"]) == (5, stamp.message_uid)
     after = request("GET", repo.route)["events"]
-    assert after[:len(before)] == before
+    assert_preserved_prefix(before, after)
     assert json.loads(b64decode(after[3]["payload"]["inline"])) == {
         "base_seq": 3, "archived": [1, 2], "rewound": [3],
     }
@@ -142,7 +159,7 @@ def publish_merged_carry(request, session):
                       watermark=3, lock_holder=HOLDER, tail_count=1, covered_ids=covered,
                       held_for_cas=original)
     after = request("GET", repo.route)["events"]
-    assert after[:len(before)] == before
+    assert_preserved_prefix(before, after)
     assert json.loads(b64decode(after[4]["payload"]["inline"])) == {
         "base_seq": 4, "archived": [1, 2], "rewound": [3, 4],
     }
