@@ -9,11 +9,39 @@ LangGraph's own Pregel executor runs your nodes inside this process.
 
 The framework-neutral State/Recovery clients need `pip install ./sdk/python`.
 For this LangGraph container use `pip install './sdk/python[langgraph]'` (published
-package: `pip install 'ahp-langgraph[langgraph]'`). The adapter/recovery test
+package: `pip install 'ahp-state[langgraph]'`). The adapter/recovery test
 environment needs `pip install './sdk/python[dev,langgraph]'`.
 See [conformance and standalone examples](../../docs/sdk/conformance.md) for the
 current verified scope. Installing the base package alone does not install the
 container's LangGraph runtime.
+
+## Compact State journal
+
+Use `AHPJournalClient` with an authenticated `StateAPIClient`. The async
+`lease()` context renews ownership in the background and stops execution on
+heartbeat failure. In synchronous code use `SyncAHPJournalClient` and renew
+with `heartbeat()`. For queued claims, commit the final native event with
+`finish_turn="IDLE"` or `finish_turn="WAITING_INPUT"` in the same request.
+
+- Install `ahp-state[langgraph]` for `AHPJournalCheckpointSaver` and
+  `AHPJournalStore`. Pass the active `AHPJournalClient` as the saver's fence
+  to clear its single 64 KiB chat projection immediately on lease release or
+  loss. For legacy fence dictionaries, the host can call
+  `clear_chat_cache()` when its lease ends. Tuple reads always go to State.
+  The first write from a historical checkpoint can read its parent, and
+  payloads above 256 KiB can require blob transfers.
+- Install `ahp-state[adk]` for `AHPJournalSessionService`. The service can
+  create sessions in the client's grant or bind a write lease obtained by
+  the host with `bind_session(session_id, lease_epoch)`. A host that uses
+  direct acquisition calls `pause_for_input(session_id=..., invocation_id=...)`
+  after `Runner.run_async(...)` yields its final event and drains. This
+  persists the disposition as `WAITING_INPUT` while retaining the native
+  interrupt event for the next lease. Use `release_session()` after a
+  completed invocation.
+- Install the native Hermes runtime in the host separately. The supported
+  Hermes source revision is `9dbaa77c4c5b6391510832602f841bc95d390b22`.
+  The `hermes` extra installs the SDK without pulling the Hermes runtime.
+  Construct `AHPHermesPersistenceStore(request, session_id, lease_epoch=epoch)`.
 
 ## Two things to provide
 

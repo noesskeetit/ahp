@@ -34,9 +34,13 @@ _EXPORTS = {
     "AHPCheckpointSaver": "ahp_state.checkpoint_saver",
     "AHPStore": "ahp_state.store",
     "AHPJournalClient": "ahp_state.journal_client",
+    "SyncAHPJournalClient": "ahp_state.journal_client",
     "AHPJournalStore": "ahp_state.journal_store",
     "AHPJournalCheckpointSaver": "ahp_state.journal_checkpointer",
+    "AHPJournalSessionService": "ahp_state.journal_adk",
+    "AHPHermesPersistenceStore": "ahp_state.adapters.hermes",
     "StandaloneToolGuard": "ahp_state.journal_tools",
+    "SessionFencedError": "ahp_state.journal_tools",
     "wire": "ahp_state.wire",
     # effects and reconciliation
     "IntentRecorder": "ahp_state.intents",

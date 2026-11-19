@@ -57,37 +57,35 @@ const (
 // Claims is the payload of an AHP access token. Field names and JSON tags are
 // a shared API consumed by the identity service and must not be renamed.
 //
-// Time-bearing claims are seconds since the Unix epoch. The signer writes every
-// field except the optional JTI, so a token that omits one of the mandatory
-// members is malformed rather than "using a default"; JTI alone is omitted when
-// it is empty.
+// Time-bearing claims are seconds since the Unix epoch. Optional members,
+// including a signed capability list, are omitted when unset.
 type Claims struct {
 	Issuer   string `json:"iss"`
 	Subject  string `json:"sub"`
 	Audience string `json:"aud"`
-	// JTI is the JWT standard identifier claim and the only optional member of
-	// this payload: the signer writes it only when it is non-empty. Task tokens
+	// JTI is the optional JWT standard identifier claim: the signer writes it only when it is non-empty. Task tokens
 	// and the control-plane human tokens the platform has always issued carry
 	// no session id, so their signed bytes keep the pre-jti wire they had
 	// before this claim existed. A credential whose revocation must be
 	// observable before its own expiry sets a jti: it makes two tokens minted
 	// for the same principal in the same second distinct, which is what lets a
 	// logout retire exactly the credential it issued.
-	JTI        string   `json:"jti,omitempty"`
-	ExpiresAt  int64    `json:"exp"`
-	IssuedAt   int64    `json:"iat"`
-	NotBefore  int64    `json:"nbf"`
-	TokenUse   string   `json:"token_use"`
-	Kind       string   `json:"token_kind"`
-	Tenant     string   `json:"tenant"`
-	Deployment string   `json:"azp"`
-	Task       string   `json:"task"`
-	Root       string   `json:"root"`
-	Context    string   `json:"ctx"`
-	CtxScope   string   `json:"ctx_scope,omitempty"`
-	Grant      string   `json:"grant"`
-	Depth      int      `json:"depth"`
-	Actors     []string `json:"act"`
+	JTI          string   `json:"jti,omitempty"`
+	ExpiresAt    int64    `json:"exp"`
+	IssuedAt     int64    `json:"iat"`
+	NotBefore    int64    `json:"nbf"`
+	TokenUse     string   `json:"token_use"`
+	Kind         string   `json:"token_kind"`
+	Tenant       string   `json:"tenant"`
+	Deployment   string   `json:"azp"`
+	Task         string   `json:"task"`
+	Root         string   `json:"root"`
+	Context      string   `json:"ctx"`
+	CtxScope     string   `json:"ctx_scope,omitempty"`
+	Capabilities []string `json:"cap,omitempty"`
+	Grant        string   `json:"grant"`
+	Depth        int      `json:"depth"`
+	Actors       []string `json:"act"`
 }
 
 // Scope projects the token claims onto the platform isolation scope. The

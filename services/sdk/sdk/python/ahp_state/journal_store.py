@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime
+from itertools import groupby
 import json
 from urllib.parse import quote
 from uuid import uuid4
@@ -17,6 +19,9 @@ from ahp_state.sync import invoke_sync
 _PREFIX = "langs:"
 _API = "/v1/state"
 _PAGE_SIZE = 128
+_MAX_MUTATIONS = 256
+_MAX_INLINE_BYTES = 2 << 20
+_MAX_BODY_BYTES = (3 << 20) - 2048
 
 
 def _namespace(parts):
@@ -49,31 +54,34 @@ class AHPJournalStore(BaseStore):
 
     async def abatch(self, ops):
         results = []
-        for op in ops:
-            if isinstance(op, GetOp):
-                row = await self._row(op.namespace, op.key)
-                result = None if row is None or row.get("deleted") else await self._item(row)
-            elif isinstance(op, PutOp):
-                await self._put(op)
-                result = None
-            elif isinstance(op, SearchOp):
-                result = await self._search(op)
-            elif isinstance(op, ListNamespacesOp):
-                result = await self._list_namespaces(op)
-            else:
-                raise TypeError(f"unsupported LangGraph store operation {type(op).__name__}")
-            results.append(result)
+        for kind, group in groupby(ops, type):
+            if issubclass(kind, PutOp):
+                puts = list(group)
+                await self._put_many(puts)
+                results.extend([None] * len(puts))
+                continue
+            for op in group:
+                if isinstance(op, GetOp):
+                    row = await self._row(op.namespace, op.key)
+                    result = None if row is None or row.get("deleted") else await self._item(row)
+                elif isinstance(op, SearchOp):
+                    result = await self._search(op)
+                elif isinstance(op, ListNamespacesOp):
+                    result = await self._list_namespaces(op)
+                else:
+                    raise TypeError(f"unsupported LangGraph store operation {type(op).__name__}")
+                results.append(result)
         return results
 
-    async def _list(self, parts, *, prefix=False, offset=0, key=None, limit=_PAGE_SIZE):
+    async def _list(self, parts, *, prefix=False, offset=0, keys=(), limit=_PAGE_SIZE):
         params = {"scope_type": "store", "namespace": _namespace(parts),
                   "prefix": str(prefix).lower(), "offset": offset, "limit": limit}
-        if key is not None:
-            params["key"] = wire.encode_id(key)
+        if keys:
+            params["key"] = [wire.encode_id(key) for key in keys]
         return await self._client.request_state("GET", _API + "/kv", params=params) or []
 
     async def _row(self, parts, key):
-        return next(iter(await self._list(parts, key=key, limit=1)), None)
+        return next(iter(await self._list(parts, keys=(key,), limit=1)), None)
 
     async def _rows(self, parts):
         for offset in range(0, 10001, _PAGE_SIZE):
@@ -91,22 +99,63 @@ class AHPJournalStore(BaseStore):
         return cls(value=value, key=wire.decode_id(row["key"]), namespace=_native_namespace(row["namespace"]),
                    created_at=timestamp, updated_at=timestamp)
 
-    async def _put(self, op):
-        if getattr(op, "ttl", None) is not None or isinstance(op.index, list):
-            raise StateValidationError("INVALID_ARGUMENT", "this store has no TTL or vector index configured")
-        row = await self._row(op.namespace, op.key)
-        if op.value is None and (row is None or row.get("deleted")):
-            return
-        state = await self._client.request_state("GET", self._session)
-        change = {"scope_type": "store", "namespace": _namespace(op.namespace),
-                  "key": wire.encode_id(op.key), "expected_version": row["version"] if row else 0}
-        if op.value is None:
-            change["delete"] = True
-        else:
-            data = json.dumps(op.value, ensure_ascii=False, sort_keys=True, allow_nan=False).encode()
-            change["payload"] = await encode_payload(self._client, self._session, self._epoch, data, allow_spill=False)
+    async def _versions(self, ops):
+        keys = defaultdict(set)
+        for op in ops:
+            if getattr(op, "ttl", None) is not None or isinstance(op.index, list):
+                raise StateValidationError("INVALID_ARGUMENT", "this store has no TTL or vector index configured")
+            keys[op.namespace].add(op.key)
+        rows = {}
+        for namespace, wanted in keys.items():
+            if len(wanted) == 1:
+                key = next(iter(wanted))
+                row = await self._row(namespace, key)
+                if row is not None:
+                    rows[namespace, key] = (row["version"], bool(row.get("deleted")))
+                continue
+            ordered = sorted(wanted)
+            for start in range(0, len(ordered), _MAX_MUTATIONS):
+                batch = ordered[start:start + _MAX_MUTATIONS]
+                for row in await self._list(namespace, keys=batch, limit=len(batch)):
+                    key = wire.decode_id(row["key"])
+                    rows[namespace, key] = (row["version"], bool(row.get("deleted")))
+        return rows
+
+    async def _put_many(self, ops):
+        versions = await self._versions(ops)
+        changes = []
+        inline_size = body_size = 0
+        for op in ops:
+            identity = (op.namespace, op.key)
+            version, deleted = versions.get(identity, (0, True))
+            if op.value is None and deleted:
+                continue
+            change = {"scope_type": "store", "namespace": _namespace(op.namespace),
+                      "key": wire.encode_id(op.key), "expected_version": version}
+            data_size = 0
+            if op.value is None:
+                change["delete"] = True
+            else:
+                data = json.dumps(op.value, ensure_ascii=False, sort_keys=True, allow_nan=False).encode()
+                change["payload"] = await encode_payload(
+                    self._client, self._session, self._epoch, data, allow_spill=False)
+                data_size = len(data)
+            change_size = len(json.dumps(change).encode()) + 1
+            if (len(changes) == _MAX_MUTATIONS or inline_size + data_size > _MAX_INLINE_BYTES
+                    or body_size + change_size > _MAX_BODY_BYTES):
+                await self._mutate(changes)
+                changes = []
+                inline_size = body_size = 0
+            changes.append(change)
+            inline_size += data_size
+            body_size += change_size
+            versions[identity] = (version + 1, op.value is None)
+        if changes:
+            await self._mutate(changes)
+
+    async def _mutate(self, changes):
         request = {"session_id": self._session_id, "lease_epoch": self._epoch,
-                   "expected_seq": state["head_seq"], "key": "langstore:" + uuid4().hex, "kv": [change]}
+                   "key": "langstore:" + uuid4().hex, "kv": changes}
         try:
             await self._client.request_state("POST", _API + "/kv:mutate", body=request)
         except StateAPIError as error:

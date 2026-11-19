@@ -94,6 +94,7 @@ type Event struct {
 }
 
 type EventPage struct {
+	Epoch        int64     `json:"lease_epoch"`
 	HeadSeq      int64     `json:"head_seq"`
 	Leaf         *string   `json:"leaf_entry_id,omitempty"`
 	AppendParent *string   `json:"append_parent_id,omitempty"`
@@ -232,11 +233,12 @@ type ChatHistory struct {
 // OpenClawCatalogUpdate is committed in the same transaction as a journal
 // event. Omitted display fields retain their previous values.
 type OpenClawCatalogUpdate struct {
-	AgentID string          `json:"agent_id,omitempty"`
-	Key     string          `json:"native_key,omitempty"`
-	Title   *string         `json:"title,omitempty"`
-	Summary json.RawMessage `json:"summary_metadata,omitempty"`
-	Prompt  *string         `json:"prompt,omitempty"`
+	ParentSessionID *string         `json:"parent_session_id,omitempty"`
+	AgentID         string          `json:"agent_id,omitempty"`
+	Key             string          `json:"native_key,omitempty"`
+	Title           *string         `json:"title,omitempty"`
+	Summary         json.RawMessage `json:"summary_metadata,omitempty"`
+	Prompt          *string         `json:"prompt,omitempty"`
 }
 
 type CatalogPage struct {
@@ -245,17 +247,18 @@ type CatalogPage struct {
 }
 
 type CatalogSession struct {
-	ID        string          `json:"session_id"`
-	AgentID   string          `json:"agent_id,omitempty"`
-	Key       string          `json:"native_key,omitempty"`
-	Title     string          `json:"title,omitempty"`
-	Status    string          `json:"status"`
-	UpdatedAt time.Time       `json:"updated_at"`
-	CreatedAt time.Time       `json:"created_at"`
-	HeadSeq   int64           `json:"head_seq"`
-	Leaf      *string         `json:"leaf_entry_id,omitempty"`
-	PromptRef string          `json:"prompt_ref,omitempty"`
-	Summary   json.RawMessage `json:"summary_metadata,omitempty"`
+	ParentSessionID *string         `json:"parent_session_id,omitempty"`
+	ID              string          `json:"session_id"`
+	AgentID         string          `json:"agent_id,omitempty"`
+	Key             string          `json:"native_key,omitempty"`
+	Title           string          `json:"title,omitempty"`
+	Status          string          `json:"status"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+	CreatedAt       time.Time       `json:"created_at"`
+	HeadSeq         int64           `json:"head_seq"`
+	Leaf            *string         `json:"leaf_entry_id,omitempty"`
+	PromptRef       string          `json:"prompt_ref,omitempty"`
+	Summary         json.RawMessage `json:"summary_metadata,omitempty"`
 }
 
 // StandaloneToolRequest identifies an already committed tool intent.
@@ -277,13 +280,14 @@ type StandaloneToolDecision struct {
 
 // ResumeState contains the durable read pointers and interrupted tool intents.
 type ResumeState struct {
-	SessionID      string       `json:"session_id"`
-	Harness        string       `json:"harness_type"`
-	FormatVersion  int          `json:"format_version"`
-	Status         string       `json:"status"`
-	HeadSeq        int64        `json:"head_seq"`
-	HeadCheckpoint *string      `json:"head_checkpoint_id,omitempty"`
-	Leaf           *string      `json:"leaf_entry_id,omitempty"`
-	AppendParent   *string      `json:"append_parent_id,omitempty"`
-	Unresolved     []ToolIntent `json:"unresolved_intents"`
+	ParentSessionID *string      `json:"parent_session_id,omitempty"`
+	SessionID       string       `json:"session_id"`
+	Harness         string       `json:"harness_type"`
+	FormatVersion   int          `json:"format_version"`
+	Status          string       `json:"status"`
+	HeadSeq         int64        `json:"head_seq"`
+	HeadCheckpoint  *string      `json:"head_checkpoint_id,omitempty"`
+	Leaf            *string      `json:"leaf_entry_id,omitempty"`
+	AppendParent    *string      `json:"append_parent_id,omitempty"`
+	Unresolved      []ToolIntent `json:"unresolved_intents"`
 }

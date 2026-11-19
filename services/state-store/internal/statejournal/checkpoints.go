@@ -333,3 +333,95 @@ func inlineWritesSize(writes []PendingWrite) int {
 	}
 	return size
 }
+
+type CheckpointPage struct {
+	IDs    []string          `json:"checkpoint_ids"`
+	Tuples []CheckpointTuple `json:"checkpoint_tuples"`
+}
+
+// ListCheckpointTuples reads a single consistent page and its writes in two
+// batch queries. It never opens one transaction or performs a read per tuple.
+func (s *Store) ListCheckpointTuples(ctx context.Context, scope contracts.Scope, session, namespace, before string, limit int, metadata json.RawMessage, includeUnindexed bool) (CheckpointPage, error) {
+	page := CheckpointPage{IDs: []string{}, Tuples: []CheckpointTuple{}}
+	if err := scope.Validate(); err != nil {
+		return page, err
+	}
+	if !validID(session) || (namespace != "" && !validID(namespace)) ||
+		(before != "" && !validID(before)) || limit < 1 || limit > 1000 {
+		return page, contracts.NewError(contracts.ErrInvalid, "invalid checkpoint page")
+	}
+	if len(metadata) == 0 {
+		metadata = json.RawMessage("{}")
+	}
+	var object map[string]json.RawMessage
+	if len(metadata) > 16<<10 || json.Unmarshal(metadata, &object) != nil || object == nil {
+		return page, contracts.NewError(contracts.ErrInvalid, "metadata filter must be a JSON object up to 16 KiB")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return page, err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `
+      SELECT c.checkpoint_id,coalesce(c.parent_checkpoint_id,''),c.snapshot_seq,c.metadata,
+        c.channel_versions,c.codec,c.inline_payload,c.blob_ref,coalesce(c.chat_event_id,'')
+      FROM ahp_journal.checkpoints c JOIN ahp_journal.sessions t USING(tenant_id,session_id)
+      WHERE c.tenant_id=$1 AND c.session_id=$2 AND t.deployment_id=$3 AND t.subject_id=$4
+        AND c.checkpoint_ns=$5 AND t.status<>'DELETED' AND ($6='' OR c.checkpoint_id<$6)
+        AND (c.metadata @> $8::jsonb OR ($9 AND c.codec='langgraph-jsonplus-v1' AND c.metadata='{}'::jsonb))
+      ORDER BY c.checkpoint_id DESC LIMIT $7`,
+		scope.Tenant, session, scope.Deployment, scope.Subject, namespace, before, limit, metadata, includeUnindexed)
+	if err != nil {
+		return page, classifyWrite(err)
+	}
+	defer rows.Close()
+	indexes := make(map[string]int, limit)
+	total := 0
+	for rows.Next() {
+		tuple := CheckpointTuple{Checkpoint: Checkpoint{Namespace: namespace}, Writes: []PendingWrite{}}
+		cp := &tuple.Checkpoint
+		if err := rows.Scan(&cp.ID, &cp.ParentID, &cp.SnapshotSeq, &cp.Metadata, &cp.ChannelVersions, &cp.Codec,
+			&cp.Payload.Inline, &cp.Payload.Blob, &cp.ChatEventID); err != nil {
+			return page, err
+		}
+		total += len(cp.Payload.Inline) + len(cp.Metadata) + len(cp.ChannelVersions)
+		if total > 16<<20 {
+			return page, contracts.NewError(contracts.ErrInvalid, "checkpoint page exceeds 16 MiB; choose a smaller limit")
+		}
+		indexes[cp.ID] = len(page.Tuples)
+		page.IDs = append(page.IDs, cp.ID)
+		page.Tuples = append(page.Tuples, tuple)
+	}
+	if err := rows.Err(); err != nil {
+		return page, classifyWrite(err)
+	}
+	if len(page.Tuples) == 0 {
+		return page, tx.Commit(ctx)
+	}
+	writes, err := tx.Query(ctx, `
+       SELECT checkpoint_id,task_id,task_path,idx,channel,codec,inline_payload,blob_ref
+       FROM ahp_journal.checkpoint_writes
+       WHERE tenant_id=$1 AND session_id=$2 AND checkpoint_ns=$3 AND checkpoint_id=ANY($4)
+       ORDER BY checkpoint_id,task_id,idx`, scope.Tenant, session, namespace, page.IDs)
+	if err != nil {
+		return page, err
+	}
+	defer writes.Close()
+	for writes.Next() {
+		var id string
+		var w PendingWrite
+		if err := writes.Scan(&id, &w.TaskID, &w.TaskPath, &w.Index, &w.Channel, &w.Codec, &w.Payload.Inline, &w.Payload.Blob); err != nil {
+			return page, err
+		}
+		total += len(w.Payload.Inline)
+		if total > 16<<20 {
+			return page, contracts.NewError(contracts.ErrInvalid, "checkpoint page exceeds 16 MiB; choose a smaller limit")
+		}
+		i := indexes[id]
+		page.Tuples[i].Writes = append(page.Tuples[i].Writes, w)
+	}
+	if err := writes.Err(); err != nil {
+		return page, err
+	}
+	return page, tx.Commit(ctx)
+}

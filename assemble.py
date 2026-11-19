@@ -9,14 +9,30 @@ import subprocess
 import tempfile
 
 
+def archive_files(root):
+    ignored_dirs = {".git", "__pycache__", ".pytest_cache", "node_modules"}
+    for group in (root / "services", root / "platform"):
+        for directory, dirs, files in os.walk(group):
+            dirs[:] = sorted(name for name in dirs if name not in ignored_dirs)
+            for name in sorted(files):
+                local_env = name == ".env" or (
+                    name.startswith(".env.") and name != ".env.example"
+                )
+                if name == ".DS_Store" or name.endswith(".pyc") or local_env:
+                    continue
+                yield (Path(directory) / name).relative_to(root).as_posix()
+
+
 def source_files(root):
-    tracked = subprocess.check_output(
-        ["git", "-C", str(root), "ls-files", "--cached", "-z", "--", "services/", "platform/"]
-    )
-    for raw_path in tracked.split(b"\0"):
-        if not raw_path:
-            continue
-        path = PurePosixPath(os.fsdecode(raw_path))
+    if (root / ".git").exists():
+        tracked = subprocess.check_output(
+            ["git", "-C", str(root), "ls-files", "--cached", "-z", "--", "services/", "platform/"]
+        )
+        paths = (os.fsdecode(raw) for raw in tracked.split(b"\0") if raw)
+    else:
+        paths = archive_files(root)
+    for name in paths:
+        path = PurePosixPath(name)
         prefix = 2 if path.parts[0] == "services" else 1
         source = root.joinpath(*path.parts)
         if not source.is_file() or source.is_symlink():

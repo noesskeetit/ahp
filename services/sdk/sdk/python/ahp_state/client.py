@@ -16,6 +16,8 @@ from typing import Any, Callable
 
 import httpx
 
+from ahp_state.common import CommonStateMethods
+
 
 class StateAPIError(Exception):
     """Base exception for AHP State API errors.
@@ -115,9 +117,6 @@ def _flat_fence(fence: dict) -> dict:
     }
 
 
-from ahp_state.common import CommonStateMethods
-
-
 class StateAPIClient(CommonStateMethods):
     """Thin async client for the AHP State API.
 
@@ -189,6 +188,11 @@ class StateAPIClient(CommonStateMethods):
         return StateAPIClient(self._base, token_source=source, http_client=self._client,
                               http_client_factory=self._http_client_factory,
                               artifacts_base_url=self._payloads.base)
+
+    @property
+    def has_fixed_scope(self) -> bool:
+        """Whether local caches can rely on this transport holding a fixed grant."""
+        return self._token_source is None
 
     async def authorization_token(self) -> str | None:
         if self._token_source is None:
@@ -274,7 +278,7 @@ class StateAPIClient(CommonStateMethods):
                 raise _raise_typed(resp.status_code, err)
             except (json.JSONDecodeError, KeyError):
                 raise StateAPIError("UNKNOWN", f"HTTP {resp.status_code}") from None
-        return resp.json()
+        return resp.json() if resp.content else None
 
     # --- Thread lifecycle ---
 

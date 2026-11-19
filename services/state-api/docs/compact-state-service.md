@@ -4,7 +4,7 @@ The service runs the compact State API on PostgreSQL 18 and a private S3-compati
 
 ## Run
 
-Provide a database, an existing bucket dedicated to the deployment, a workload CA, a TLS server key pair, and a trusted Ed25519 JWT issuer. Grant the State API identity read, write, list, and delete access to its S3 prefix including object versions if bucket versioning is enabled. Provision the grants file and inject secrets into the service environment.
+Provide a database, an existing bucket dedicated to the deployment, a workload CA, a TLS server key pair, and a trusted Ed25519 JWT issuer. Grant the State API identity read, write, list, and delete access to its S3 prefix including object versions if bucket versioning is enabled. Inject secrets into the service environment.
 
 From the repository root:
 
@@ -18,14 +18,23 @@ go run ./cmd/state-api
 | `AHP_STATE_ADDR` | Bind address, default `127.0.0.1:8443` |
 | `AHP_STATE_TLS_CERT`, `AHP_STATE_TLS_KEY`, `AHP_STATE_CLIENT_CA` | Server TLS material and trusted workload CA |
 | `AHP_STATE_TOKEN_ISSUER`, `AHP_STATE_TOKEN_KID`, `AHP_STATE_TOKEN_PUBLIC_KEY` | JWT trust settings and path to an Ed25519 public key PEM |
-| `AHP_STATE_GRANTS_FILE` | Path to an array of locally authorized scope and grant records |
+| `AHP_STATE_GRANTS_FILE` | Optional path to locally authorized scope and grant records |
 | `AHP_STATE_S3_ENDPOINT`, `AHP_STATE_S3_BUCKET` | S3 API host with optional port and existing private bucket |
 | `AHP_STATE_S3_ACCESS_KEY`, `AHP_STATE_S3_SECRET_KEY` | S3 credentials from the service's secret source |
 | `AHP_STATE_S3_TLS` | S3 TLS toggle, default `true` |
 | `AHP_STATE_RETENTION`, `AHP_STATE_STAGING_TTL` | Deleted-session retention and orphan-upload age, defaults 30 days and one hour |
 | `AHP_STATE_TOOL_LEASE_KEY`, `AHP_STATE_TOOL_LEASE_ISSUER`, `AHP_STATE_TOOL_LEASE_KID` | Optional dedicated signing authority for fenced Tool Gateway requests |
 
-The State API verifies the client certificate, task JWT, and matching local grant. Tasks use the `ahp` audience. The grant file is loaded at startup. For example, a fixture grant restricted to one subject is:
+The State API verifies the client certificate and a task JWT bound to that workload.
+Tasks use the `ahp` audience. The issuer supplies the explicit signed capability
+list as `"cap":["state"]`. Additional permissions require `state.shared` or
+`state.retention` in that list. An unrecognized grant ID does not confer a
+capability by itself.
+
+With `AHP_STATE_GRANTS_FILE` set, the local file is the authority. Replace the
+file atomically. The process watches for changes and reloads on SIGHUP. Invalid
+replacements deny access until a valid policy is loaded. This fixture grants
+access to a single subject.
 
 ```json
 [
@@ -38,10 +47,10 @@ The compact migration is embedded in the service and serializes concurrent boots
 
 ## Inside a session
 
-- `sessions` holds ownership, lease epoch, durable input position, and current checkpoint and journal pointers. Workers claim queued work through the API. The sweeper returns expired claims to the queue and keeps their original input.
+- `sessions` holds ownership, lease epoch, durable input position, and current checkpoint and journal pointers. Workers claim queued work through the API. The sweeper finds expired claims across tenants in PostgreSQL, returns them to the queue, and keeps their original input.
 - `session_events` holds the ordered journal and stable append receipts. Adapters can include text for search and record visibility changes in the same transaction as the operation that caused them.
-- `checkpoints` and `checkpoint_writes` hold typed snapshots and pending graph writes. The adapter owns the codec and reconstructs the native state.
-- `scoped_kv` holds session, user, app, and per-user framework store keys. A deletion keeps its CAS revision so delayed updates cannot silently recreate a key.
+- `checkpoints` and `checkpoint_writes` hold typed snapshots and pending graph writes. The adapter owns the codec and reconstructs the native state. A list with `include_tuples=true` returns snapshots and their pending writes together. The `metadata` filter accepts a JSON object.
+- `scoped_kv` holds session, user, app, and per-user framework store keys. A deletion keeps its CAS revision so delayed updates cannot silently recreate a key. `POST /v1/state/kv:mutate` commits a fenced CAS batch and a private session receipt without a journal event. `expected_seq` is optional. Batch reads accept repeated `key` query parameters.
 - `tool_intents` records external action admission and its outcome. A prepared action can receive at most one direct-dispatch permission. A replacement worker treats unresolved work as unknown and blocks automatic duplicate execution. After an uncertain admission response, SDKs retry with `ack_lost` to record uncertainty in the same epoch. The recovery request never authorizes dispatch.
 
 Clients preserve stable mutation keys and supply the current lease epoch. The Go SDK lives at `sdk/go/state/journal`. The Python SDK exposes the native LangGraph checkpoint saver and BaseStore and provides shared blob and standalone tool helpers. The two JavaScript-based adapters use the TypeScript-facing client in `sdk/ts/ahp-state`.

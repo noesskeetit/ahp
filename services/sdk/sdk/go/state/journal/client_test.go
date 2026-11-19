@@ -130,3 +130,141 @@ func TestJournalCheckpointRoundTripAndFreshToken(t *testing.T) {
 		t.Fatalf("expired writer: %v", err)
 	}
 }
+
+func TestCatalogAndCheckpointTupleQueries(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/state/sessions", func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if query.Get("view") != "catalog" || query.Get("harness") != "hermes" ||
+			query.Get("cursor") != "next+page" || query.Get("search_query") != "test & trace" ||
+			len(query["configured_agent_id"]) != 2 {
+			t.Errorf("catalog query = %v", query)
+		}
+		fmt.Fprint(w, `{"sessions":[{"session_id":"session"}],"next_cursor":"more"}`)
+	})
+	mux.HandleFunc("GET /v1/state/sessions/session/checkpoints", func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if query.Get("list") != "true" || query.Get("include_tuples") != "true" ||
+			query.Get("before") != "prev" || query.Get("checkpoint_ns") != "namespace" ||
+			query.Get("limit") != "20" || query.Get("metadata") != `{"step":4}` {
+			t.Errorf("checkpoint list query = %v", query)
+		}
+		fmt.Fprint(w, `{"checkpoint_ids":["id"],"checkpoint_tuples":[{"checkpoint":{"id":"id"},"writes":[{"channel":"chat"}]}]}`)
+	})
+	client := newTestJournal(t, mux)
+	ctx := context.Background()
+	page, err := client.ListCatalog(ctx, journal.CatalogQuery{
+		Harness: "hermes", Cursor: "next+page", Search: "test & trace",
+		AgentIDs: []string{"one", "two"},
+	})
+	if err != nil || len(page.Sessions) != 1 || page.Sessions[0].ID != "session" || page.NextCursor != "more" {
+		t.Fatalf("catalog = %+v, error = %v", page, err)
+	}
+	tuples, err := client.ListCheckpointTuples(ctx, "session", "namespace", "prev", 20, json.RawMessage(`{"step":4}`))
+	if err != nil || len(tuples) != 1 || tuples[0].Checkpoint.ID != "id" ||
+		len(tuples[0].Writes) != 1 || tuples[0].Writes[0].Channel != "chat" {
+		t.Fatalf("checkpoint tuples = %+v, error = %v", tuples, err)
+	}
+}
+
+func TestHeartbeatCancelsOnFenceAndReleaseToWaitingInput(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/state/sessions/session:heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Epoch   int64  `json:"lease_epoch"`
+			TTL     int64  `json:"ttl_ms"`
+			Release bool   `json:"release"`
+			Status  string `json:"status"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Epoch != 5 {
+			t.Errorf("heartbeat body = %+v, error = %v", body, err)
+		}
+		if body.Release {
+			if body.Status != "WAITING_INPUT" {
+				t.Errorf("release status = %q", body.Status)
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if body.TTL != 60 {
+			t.Errorf("heartbeat TTL = %d", body.TTL)
+		}
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"code":"STALE_EPOCH","message":"ownership changed"}`)
+	})
+	client := newTestJournal(t, mux)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	leaseCtx, stop := client.RunHeartbeat(ctx, "session", 5, 60*time.Millisecond)
+	defer stop()
+	<-leaseCtx.Done()
+	if got := contracts.Code(context.Cause(leaseCtx)); got != contracts.ErrStaleEpoch {
+		t.Fatalf("heartbeat cancellation cause = %v", context.Cause(leaseCtx))
+	}
+	if err := client.ReleaseLeaseTo(ctx, "session", 5, "WAITING_INPUT"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestJournalPayloadSpillsAndChecksSizeAndDigest(t *testing.T) {
+	data := make([]byte, 256<<10+1)
+	data[len(data)-1] = 42
+	ref := journal.BlobRef{
+		ArtifactID: "blob", Version: "1", SizeBytes: int64(len(data)),
+		SHA256: fmt.Sprintf("%x", sha256.Sum256(data)),
+	}
+	var staged atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/state/sessions/session/blobs:stage", func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			Epoch int64  `json:"lease_epoch"`
+			Data  []byte `json:"data"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.Epoch != 5 ||
+			sha256.Sum256(input.Data) != sha256.Sum256(data) {
+			t.Errorf("staged epoch = %d, size = %d, error = %v", input.Epoch, len(input.Data), err)
+		}
+		staged.Add(1)
+		_ = json.NewEncoder(w).Encode(ref)
+	})
+	mux.HandleFunc("POST /v1/state/sessions/session/blobs:read", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string][]byte{"data": data})
+	})
+	client := newTestJournal(t, mux)
+	ctx := context.Background()
+	for _, size := range []int{0, 256 << 10} {
+		payload, err := client.EncodePayload(ctx, "session", 5, data[:size])
+		if err != nil || payload.Blob != nil || payload.Inline == nil || len(payload.Inline) != size {
+			t.Fatalf("inline %d = %d bytes, blob = %+v, error = %v", size, len(payload.Inline), payload.Blob, err)
+		}
+	}
+	payload, err := client.EncodePayload(ctx, "session", 5, data)
+	if err != nil || payload.Blob == nil || *payload.Blob != ref || staged.Load() != 1 {
+		t.Fatalf("spill = %+v, error = %v, staged = %d", payload.Blob, err, staged.Load())
+	}
+	if got, err := client.DecodePayload(ctx, "session", payload); err != nil || sha256.Sum256(got) != sha256.Sum256(data) {
+		t.Fatalf("decode = %d bytes, error = %v", len(got), err)
+	}
+	wrongSize, wrongDigest := ref, ref
+	wrongSize.SizeBytes++
+	wrongDigest.SHA256 = fmt.Sprintf("%x", sha256.Sum256([]byte("different")))
+	for _, invalid := range []journal.BlobRef{wrongSize, wrongDigest} {
+		if _, err := client.DecodePayload(ctx, "session", journal.Payload{Blob: &invalid}); err == nil {
+			t.Fatalf("accepted invalid descriptor %+v", invalid)
+		}
+	}
+}
+
+func newTestJournal(t *testing.T, handler http.Handler) *journal.Client {
+	t.Helper()
+	server := httptest.NewTLSServer(handler)
+	t.Cleanup(server.Close)
+	client, err := journal.New(journal.Config{
+		BaseURL: server.URL, HTTPClient: server.Client(),
+		TokenSource: func(context.Context) (string, error) { return "task-token", nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}

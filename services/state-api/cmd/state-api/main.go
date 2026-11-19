@@ -18,12 +18,14 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/ahp-platform/ahp/internal/statejournal"
 	"github.com/ahp-platform/ahp/pkg/auth"
 	"github.com/ahp-platform/ahp/pkg/contracts"
+	"github.com/ahp-platform/ahp/pkg/transport"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -38,8 +40,7 @@ func main() {
 	}
 }
 
-// The grant file is the local authority in autonomous deployment. A trusted
-// issuer signs task JWTs, but a token alone cannot extend a grant's scope.
+// An optional local grant file authorizes explicitly configured offline grants.
 type grant struct {
 	Tenant       string   `json:"tenant_id"`
 	Deployment   string   `json:"deployment_id"`
@@ -58,8 +59,7 @@ type grantKey struct {
 }
 
 type grantPolicy struct {
-	grants  map[grantKey][]string
-	tenants []string
+	grants map[grantKey][]string
 }
 
 func readGrants(path string) (grantPolicy, error) {
@@ -86,10 +86,7 @@ func readGrants(path string) (grantPolicy, error) {
 			return grantPolicy{}, errors.New("duplicate State API grant")
 		}
 		policy.grants[key] = rule.Capabilities
-		policy.tenants = append(policy.tenants, rule.Tenant)
 	}
-	slices.Sort(policy.tenants)
-	policy.tenants = slices.Compact(policy.tenants)
 	return policy, nil
 }
 
@@ -100,11 +97,74 @@ func (p grantPolicy) authorize(_ context.Context, claims auth.Claims, capability
 	return nil
 }
 
+func authorizeClaims(_ context.Context, claims auth.Claims, capability string) error {
+	if claims.Kind != auth.KindTask || !slices.Contains(claims.Capabilities, capability) {
+		return contracts.NewError(contracts.ErrForbidden, "task token does not grant the requested State capability")
+	}
+	return nil
+}
+
+func grantAuthorizer(ctx context.Context, path string) (transport.Authorize, error) {
+	if path == "" {
+		return authorizeClaims, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, errors.New("could not read State API grant file metadata")
+	}
+	initial, err := readGrants(path)
+	if err != nil {
+		return nil, err
+	}
+	var active atomic.Pointer[grantPolicy]
+	active.Store(&initial)
+	reload := make(chan os.Signal, 1)
+	signal.Notify(reload, syscall.SIGHUP)
+	go func() {
+		defer signal.Stop(reload)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		last := info
+		for {
+			force := false
+			select {
+			case <-ctx.Done():
+				return
+			case <-reload:
+				force = true
+			case <-ticker.C:
+			}
+			next, err := os.Stat(path)
+			if !force && err == nil && last != nil && os.SameFile(last, next) &&
+				next.ModTime().Equal(last.ModTime()) && next.Size() == last.Size() {
+				continue
+			}
+			policy, err := readGrants(path)
+			if err != nil {
+				if active.Swap(nil) != nil {
+					slog.Warn("State grant policy unavailable; authorization denied until reload", "error", err)
+				}
+				last = nil
+				continue
+			}
+			active.Store(&policy)
+			last = next
+		}
+	}()
+	return func(ctx context.Context, claims auth.Claims, capability string) error {
+		policy := active.Load()
+		if policy == nil {
+			return contracts.NewError(contracts.ErrForbidden, "local State grant policy is unavailable")
+		}
+		return policy.authorize(ctx, claims, capability)
+	}, nil
+}
+
 func run(ctx context.Context, env func(string) string) error {
 	for _, key := range []string{
 		"AHP_STATE_DSN", "AHP_STATE_TLS_CERT", "AHP_STATE_TLS_KEY", "AHP_STATE_CLIENT_CA",
 		"AHP_STATE_TOKEN_ISSUER", "AHP_STATE_TOKEN_KID", "AHP_STATE_TOKEN_PUBLIC_KEY",
-		"AHP_STATE_GRANTS_FILE", "AHP_STATE_S3_ENDPOINT", "AHP_STATE_S3_ACCESS_KEY",
+		"AHP_STATE_S3_ENDPOINT", "AHP_STATE_S3_ACCESS_KEY",
 		"AHP_STATE_S3_SECRET_KEY", "AHP_STATE_S3_BUCKET",
 	} {
 		if env(key) == "" {
@@ -119,7 +179,9 @@ func run(ctx context.Context, env func(string) string) error {
 	if err != nil {
 		return err
 	}
-	policy, err := readGrants(env("AHP_STATE_GRANTS_FILE"))
+	policyCtx, stopPolicy := context.WithCancel(ctx)
+	defer stopPolicy()
+	authorize, err := grantAuthorizer(policyCtx, env("AHP_STATE_GRANTS_FILE"))
 	if err != nil {
 		return err
 	}
@@ -164,7 +226,7 @@ func run(ctx context.Context, env func(string) string) error {
 	verifier := auth.NewVerifier(env("AHP_STATE_TOKEN_ISSUER"), map[string]ed25519.PublicKey{
 		env("AHP_STATE_TOKEN_KID"): publicKey,
 	})
-	handler, err := stateHandler(store, verifier, policy, env)
+	handler, err := stateHandler(store, verifier, authorize, env)
 	if err != nil {
 		return err
 	}
@@ -200,7 +262,7 @@ func run(ctx context.Context, env func(string) string) error {
 	maintenanceDone := make(chan struct{})
 	go func() {
 		defer close(maintenanceDone)
-		runMaintenance(maintenanceCtx, store, policy.tenants, retention, staging)
+		runMaintenance(maintenanceCtx, store, retention, staging)
 	}()
 	defer func() {
 		stopMaintenance()
@@ -209,7 +271,7 @@ func run(ctx context.Context, env func(string) string) error {
 	sweeperDone := make(chan struct{})
 	go func() {
 		defer close(sweeperDone)
-		runSweeper(maintenanceCtx, store, policy.tenants)
+		runSweeper(maintenanceCtx, store)
 	}()
 	defer func() {
 		stopMaintenance()
@@ -233,10 +295,10 @@ func run(ctx context.Context, env func(string) string) error {
 	}
 }
 
-func stateHandler(store *statejournal.Store, verifier *auth.Verifier, policy grantPolicy, env func(string) string) (http.Handler, error) {
+func stateHandler(store *statejournal.Store, verifier *auth.Verifier, authorize transport.Authorize, env func(string) string) (http.Handler, error) {
 	file := env("AHP_STATE_TOOL_LEASE_KEY")
 	if file == "" {
-		return statejournal.NewHTTP(store, verifier, policy.authorize)
+		return statejournal.NewHTTP(store, verifier, authorize)
 	}
 	raw, err := readPEM(file, "PRIVATE KEY")
 	if err != nil {
@@ -251,7 +313,7 @@ func stateHandler(store *statejournal.Store, verifier *auth.Verifier, policy gra
 	if err != nil {
 		return nil, err
 	}
-	return statejournal.NewHTTPWithToolLeases(store, verifier, policy.authorize, signer)
+	return statejournal.NewHTTPWithToolLeases(store, verifier, authorize, signer)
 }
 
 func stateTLS(env func(string) string) (*tls.Config, error) {
@@ -310,16 +372,22 @@ func durationSetting(env func(string) string, name string, fallback, minimum tim
 	return d, nil
 }
 
-func runMaintenance(ctx context.Context, store *statejournal.Store, tenants []string, retention, staging time.Duration) {
+func runMaintenance(ctx context.Context, store *statejournal.Store, retention, staging time.Duration) {
 	ticker := time.NewTicker(45 * time.Second)
 	defer ticker.Stop()
 	for {
+		now := time.Now()
+		discover, cancel := context.WithTimeout(ctx, 5*time.Second)
+		tenants, err := store.FindMaintenanceTenants(discover, now.Add(-retention), now.Add(-staging))
+		cancel()
+		if err != nil && ctx.Err() == nil {
+			slog.Warn("State API maintenance tenant discovery will retry", "error", err)
+		}
 		for _, tenant := range tenants {
 			if ctx.Err() != nil {
 				return
 			}
 			tick, cancel := context.WithTimeout(ctx, 35*time.Second)
-			now := time.Now()
 			if err := store.SweepDeletedSessions(tick, tenant, now.Add(-retention), 64); err != nil && ctx.Err() == nil {
 				slog.Warn("State API retention sweep will retry", "error", err)
 			}
@@ -336,12 +404,18 @@ func runMaintenance(ctx context.Context, store *statejournal.Store, tenants []st
 	}
 }
 
-func runSweeper(ctx context.Context, store *statejournal.Store, tenants []string) {
+func runSweeper(ctx context.Context, store *statejournal.Store) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
+			discover, cancel := context.WithTimeout(ctx, time.Second)
+			tenants, err := store.FindExpiredTurnTenants(discover)
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				slog.Warn("State API recovery tenant discovery will retry", "error", err)
+			}
 			for _, tenant := range tenants {
 				tick, cancel := context.WithTimeout(ctx, time.Second)
 				_, err := store.RequeueExpiredTurns(tick, tenant, 64)

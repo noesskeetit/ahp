@@ -132,19 +132,8 @@ func (s *Store) AppendEvents(ctx context.Context, scope contracts.Scope, session
 			return AppendReceipt{}, contracts.NewError(contracts.ErrInvalid, "event patches must match distinct existing events")
 		}
 	}
-	mutations := slices.Clone(request.KV)
-	slices.SortFunc(mutations, func(a, b KVMutation) int {
-		for _, fields := range [][2]string{{a.ScopeType, b.ScopeType}, {a.Namespace, b.Namespace}, {a.Key, b.Key}} {
-			if order := strings.Compare(fields[0], fields[1]); order != 0 {
-				return order
-			}
-		}
-		return 0
-	})
-	for _, mutation := range mutations {
-		if err := putKV(ctx, tx, scope, session, mutation); err != nil {
-			return AppendReceipt{}, err
-		}
+	if err := applyKV(ctx, tx, scope, session, request.KV); err != nil {
+		return AppendReceipt{}, err
 	}
 	if err := prepareIntents(ctx, tx, scope.Tenant, session, lease.Epoch, request.Intents); err != nil {
 		return AppendReceipt{}, err
@@ -156,7 +145,7 @@ func (s *Store) AppendEvents(ctx context.Context, scope contracts.Scope, session
 		return AppendReceipt{}, err
 	}
 	if request.Catalog != nil {
-		if err := updateOpenClawCatalog(ctx, tx, scope, session, *request.Catalog); err != nil {
+		if err := updateCatalog(ctx, tx, scope, session, *request.Catalog); err != nil {
 			return AppendReceipt{}, err
 		}
 	}
@@ -169,6 +158,24 @@ func (s *Store) AppendEvents(ctx context.Context, scope contracts.Scope, session
 		return AppendReceipt{}, err
 	}
 	return receipt, nil
+}
+
+func applyKV(ctx context.Context, tx pgx.Tx, scope contracts.Scope, session string, changes []KVMutation) error {
+	mutations := slices.Clone(changes)
+	slices.SortStableFunc(mutations, func(a, b KVMutation) int {
+		for _, fields := range [][2]string{{a.ScopeType, b.ScopeType}, {a.Namespace, b.Namespace}, {a.Key, b.Key}} {
+			if order := strings.Compare(fields[0], fields[1]); order != 0 {
+				return order
+			}
+		}
+		return 0
+	})
+	for _, mutation := range mutations {
+		if err := putKV(ctx, tx, scope, session, mutation); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func insertEvent(ctx context.Context, tx pgx.Tx, tenant, session string, seq int64, event EventInput, key any, digest []byte, result any) error {
@@ -287,8 +294,8 @@ func validateAppend(session string, lease Lease, shared bool, request AppendRequ
 		}
 	}
 	for _, change := range request.KV {
-		if change.Namespace == catalogPromptNamespace {
-			return contracts.NewError(contracts.ErrInvalid, "catalog prompt keys are managed by the OpenClaw journal")
+		if change.Namespace == catalogPromptNamespace || change.Namespace == kvReceiptNamespace {
+			return contracts.NewError(contracts.ErrInvalid, "reserved journal KV namespace")
 		}
 		switch change.ScopeType {
 		case "session":
@@ -391,10 +398,10 @@ func (s *Store) filteredEvents(ctx context.Context, scope contracts.Scope, sessi
 	}
 	defer tx.Rollback(ctx)
 	err = tx.QueryRow(ctx, `
-		SELECT head_seq, leaf_entry_id, append_parent_id FROM ahp_journal.sessions
+		SELECT head_seq, leaf_entry_id, append_parent_id, lease_epoch FROM ahp_journal.sessions
 		WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4
 		  AND status <> 'DELETED'`, scope.Tenant, session, scope.Deployment, scope.Subject).
-		Scan(&page.HeadSeq, &page.Leaf, &page.AppendParent)
+		Scan(&page.HeadSeq, &page.Leaf, &page.AppendParent, &page.Epoch)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return page, contracts.NewError(contracts.ErrNotFound, "session not found")
 	}

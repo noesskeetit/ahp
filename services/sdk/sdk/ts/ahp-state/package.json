@@ -2,13 +2,35 @@
   "name": "@ahp-platform/state",
   "version": "0.1.0",
   "type": "module",
+  "files": ["src"],
   "exports": {
     ".": {
       "types": "./src/index.d.mts",
       "import": "./src/index.mjs"
+    },
+    "./deepseek": {
+      "types": "./src/deepseek.d.mts",
+      "import": "./src/deepseek.mjs"
+    },
+    "./openclaw": {
+      "types": "./src/openclaw.d.mts",
+      "import": "./src/openclaw.mjs"
     }
   },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
   "engines": {
-    "node": ">=22"
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-session": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-session-persistence": "0.2.1-alpha.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {"optional": true},
+    "@deepseek-ai/dsh-session": {"optional": true},
+    "@deepseek-ai/dsh-session-persistence": {"optional": true}
   }
 }

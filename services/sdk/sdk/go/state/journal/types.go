@@ -1,6 +1,10 @@
 package journal
 
-import "github.com/ahp-platform/ahp/pkg/contracts/journal"
+import (
+	"time"
+
+	"github.com/ahp-platform/ahp/pkg/contracts/journal"
+)
 
 type (
 	Payload                = journal.Payload
@@ -38,3 +42,12 @@ type (
 	CatalogPage            = journal.CatalogPage
 	CatalogSession         = journal.CatalogSession
 )
+
+// CatalogQuery filters a page of harness-native session cards.
+type CatalogQuery struct {
+	Harness, AppID, AgentID, UserID, Status, Search, Cursor string
+	Label, SpawnedBy                                        string
+	AgentIDs                                                []string
+	UpdatedAfter                                            *time.Time
+	Limit, Offset                                           int
+}

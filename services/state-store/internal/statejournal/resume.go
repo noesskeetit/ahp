@@ -26,11 +26,11 @@ func (s *Store) InspectSession(ctx context.Context, scope contracts.Scope, sessi
 	defer tx.Rollback(ctx)
 	state.SessionID = session
 	err = tx.QueryRow(ctx, `
-		SELECT harness_type,format_version,status,head_seq,head_checkpoint_id,leaf_entry_id,append_parent_id
+		SELECT harness_type,format_version,status,head_seq,head_checkpoint_id,leaf_entry_id,append_parent_id,parent_session_id
 		FROM ahp_journal.sessions
 		WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4 AND status<>'DELETED'`,
 		scope.Tenant, session, scope.Deployment, scope.Subject).Scan(&state.Harness, &state.FormatVersion, &state.Status,
-		&state.HeadSeq, &state.HeadCheckpoint, &state.Leaf, &state.AppendParent)
+		&state.HeadSeq, &state.HeadCheckpoint, &state.Leaf, &state.AppendParent, &state.ParentSessionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ResumeState{}, contracts.NewError(contracts.ErrNotFound, "session not found")
 	}

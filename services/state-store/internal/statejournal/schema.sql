@@ -284,3 +284,15 @@ BEGIN
     END LOOP;
 END
 $partitions$;
+
+CREATE INDEX IF NOT EXISTS sessions_global_turn_sweeper_idx
+    ON ahp_journal.sessions (lease_expires_at, tenant_id)
+    WHERE status='ACTIVE' AND turn_input_seq IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS sessions_global_retention_sweeper_idx
+    ON ahp_journal.sessions (deleted_at, tenant_id)
+    WHERE status='DELETED' AND retention_swept_at IS NULL AND NOT legal_hold;
+
+CREATE INDEX IF NOT EXISTS sessions_global_stage_sweeper_idx
+    ON ahp_journal.sessions (blob_stage_at, tenant_id)
+    WHERE blob_stage_at IS NOT NULL AND NOT legal_hold AND status <> 'DELETED';

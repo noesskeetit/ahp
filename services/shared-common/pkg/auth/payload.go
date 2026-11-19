@@ -19,19 +19,20 @@ type rawClaims struct {
 	Audience string `json:"aud"`
 	// JTI is optional: absent on task and control-plane human tokens (decodes
 	// to ""), present on browser credentials that carry a session id.
-	JTI        string          `json:"jti,omitempty"`
-	ExpiresAt  json.RawMessage `json:"exp"`
-	IssuedAt   json.RawMessage `json:"iat"`
-	NotBefore  json.RawMessage `json:"nbf"`
-	TokenUse   string          `json:"token_use"`
-	Kind       string          `json:"token_kind"`
-	Tenant     string          `json:"tenant"`
-	Deployment string          `json:"azp"`
-	Task       string          `json:"task"`
-	Root       string          `json:"root"`
-	Context    string          `json:"ctx"`
-	CtxScope   string          `json:"ctx_scope,omitempty"`
-	Grant      string          `json:"grant"`
-	Depth      int             `json:"depth"`
-	Actors     []string        `json:"act"`
+	JTI          string          `json:"jti,omitempty"`
+	ExpiresAt    json.RawMessage `json:"exp"`
+	IssuedAt     json.RawMessage `json:"iat"`
+	NotBefore    json.RawMessage `json:"nbf"`
+	TokenUse     string          `json:"token_use"`
+	Kind         string          `json:"token_kind"`
+	Tenant       string          `json:"tenant"`
+	Deployment   string          `json:"azp"`
+	Task         string          `json:"task"`
+	Root         string          `json:"root"`
+	Context      string          `json:"ctx"`
+	CtxScope     string          `json:"ctx_scope,omitempty"`
+	Capabilities []string        `json:"cap,omitempty"`
+	Grant        string          `json:"grant"`
+	Depth        int             `json:"depth"`
+	Actors       []string        `json:"act"`
 }

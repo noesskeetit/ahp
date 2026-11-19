@@ -1,6 +1,7 @@
 package statejournal
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -215,6 +216,11 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 			if err != nil || limit < 1 || limit > 1000 {
 				return nil, invalidHTTP("invalid limit")
 			}
+			if query.Get("include_tuples") == "true" {
+				return store.ListCheckpointTuples(r.Context(), caller.Scope, r.PathValue("session"),
+					query.Get("checkpoint_ns"), query.Get("before"), int(limit),
+					json.RawMessage(query.Get("metadata")), query.Get("include_unindexed") == "true")
+			}
 			ids, err := store.ListCheckpointIDs(r.Context(), caller.Scope, r.PathValue("session"),
 				query.Get("checkpoint_ns"), query.Get("before"), int(limit))
 			return struct {
@@ -259,8 +265,8 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 				break
 			}
 		}
-		return store.AppendEvents(r.Context(), caller.Scope, req.Session, authorizedLease(caller, req.Epoch), shared,
-			AppendRequest{Key: req.Key, ExpectedSeq: req.ExpectedSeq, KV: req.KV})
+		return store.MutateKV(r.Context(), caller.Scope, req.Session, authorizedLease(caller, req.Epoch), shared,
+			KVBatch{Key: req.Key, ExpectedSeq: req.ExpectedSeq, KV: req.KV, Catalog: req.Catalog})
 	}))
 	mux.HandleFunc("GET /v1/state/kv", readRoute(func(r *http.Request, caller transport.Principal) (any, error) {
 		query := r.URL.Query()
@@ -279,7 +285,7 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 			return nil, invalidHTTP("invalid KV offset")
 		}
 		return store.ListKV(r.Context(), caller.Scope, KVQuery{
-			Session: query.Get("session_id"), ScopeType: scopeType, Namespace: query.Get("namespace"), Key: query.Get("key"),
+			Session: query.Get("session_id"), ScopeType: scopeType, Namespace: query.Get("namespace"), Keys: query["key"],
 			Prefix: query.Get("prefix") == "true", Limit: int(limit), Offset: int(offset),
 		})
 	}))
@@ -353,11 +359,12 @@ type pendingWritesRequest struct {
 }
 
 type kvRequest struct {
-	Session     string       `json:"session_id"`
-	Epoch       int64        `json:"lease_epoch"`
-	Key         string       `json:"key"`
-	ExpectedSeq int64        `json:"expected_seq"`
-	KV          []KVMutation `json:"kv"`
+	Catalog     *OpenClawCatalogUpdate `json:"catalog,omitempty"`
+	Session     string                 `json:"session_id"`
+	Epoch       int64                  `json:"lease_epoch"`
+	Key         string                 `json:"key"`
+	ExpectedSeq int64                  `json:"expected_seq"`
+	KV          []KVMutation           `json:"kv"`
 }
 
 type intentRequest struct {

@@ -14,7 +14,7 @@ import zipfile
 assert Path.cwd() == Path("/tmp")
 assert sys.flags.isolated, "use Python -I to avoid cwd/PYTHONPATH source masking"
 packages = ("ahp_state", "ahp_memory", "ahp_clients")
-distribution = importlib.metadata.distribution("ahp-langgraph")
+distribution = importlib.metadata.distribution("ahp-state")
 installed = {}
 for name in packages:
     module = importlib.import_module(name)

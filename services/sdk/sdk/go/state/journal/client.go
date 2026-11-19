@@ -3,10 +3,14 @@ package journal
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ahp-platform/ahp/pkg/contracts"
@@ -14,6 +18,8 @@ import (
 )
 
 const sessions = "/v1/state/sessions"
+
+const inlinePayloadLimit = 256 << 10
 
 type Config struct {
 	BaseURL     string
@@ -68,13 +74,51 @@ func (c *Client) HeartbeatLease(ctx context.Context, session string, epoch int64
 }
 
 func (c *Client) ReleaseLease(ctx context.Context, session string, epoch int64) error {
-	return c.http.Call(ctx, sessionPath(session)+":heartbeat", leaseChange{Epoch: epoch, Release: true}, nil, true)
+	return c.ReleaseLeaseTo(ctx, session, epoch, "")
+}
+
+// ReleaseLeaseTo releases the lease with status IDLE or WAITING_INPUT.
+func (c *Client) ReleaseLeaseTo(ctx context.Context, session string, epoch int64, status string) error {
+	return c.http.Call(ctx, sessionPath(session)+":heartbeat",
+		leaseChange{Epoch: epoch, Release: true, Status: status}, nil, true)
+}
+
+// RunHeartbeat renews an acquired lease every third of ttl. Use the returned
+// context for lease-bound work and call stop before releasing the lease.
+// A failed renewal cancels that context with the error as its cause.
+func (c *Client) RunHeartbeat(ctx context.Context, session string, epoch int64, ttl time.Duration) (context.Context, context.CancelFunc) {
+	leaseCtx, cancel := context.WithCancelCause(ctx)
+	stop := func() { cancel(context.Canceled) }
+	if ttl.Milliseconds() < 1 {
+		cancel(contracts.NewError(contracts.ErrInvalid, "lease duration must be at least one millisecond"))
+		return leaseCtx, stop
+	}
+	go func() {
+		timer := time.NewTicker(ttl / 3)
+		defer timer.Stop()
+		for {
+			select {
+			case <-leaseCtx.Done():
+				return
+			case <-timer.C:
+				renewalContext, end := context.WithTimeout(leaseCtx, ttl/3)
+				_, err := c.HeartbeatLease(renewalContext, session, epoch, ttl)
+				end()
+				if err != nil {
+					cancel(err)
+					return
+				}
+			}
+		}
+	}()
+	return leaseCtx, stop
 }
 
 type leaseChange struct {
-	Epoch   int64 `json:"lease_epoch"`
-	TTL     int64 `json:"ttl_ms,omitempty"`
-	Release bool  `json:"release,omitempty"`
+	Epoch   int64  `json:"lease_epoch"`
+	TTL     int64  `json:"ttl_ms,omitempty"`
+	Release bool   `json:"release,omitempty"`
+	Status  string `json:"status,omitempty"`
 }
 
 func (c *Client) EnqueueTurn(ctx context.Context, input EnqueueRequest) (EnqueueReceipt, error) {
@@ -108,6 +152,36 @@ func (c *Client) InspectSession(ctx context.Context, session string) (ResumeStat
 func (c *Client) ListSessions(ctx context.Context, harness, cursor string, limit int) (SessionPage, error) {
 	var result SessionPage
 	query := url.Values{"harness": {harness}, "cursor": {cursor}, "limit": {strconv.Itoa(limit)}}
+	err := c.get(ctx, sessions, query, &result)
+	return result, err
+}
+
+// ListCatalog returns the selected harness's session cards, ordered by
+// recent activity. Pass NextCursor as Cursor to continue the listing.
+func (c *Client) ListCatalog(ctx context.Context, filter CatalogQuery) (CatalogPage, error) {
+	var result CatalogPage
+	query := url.Values{"view": {"catalog"}, "harness": {filter.Harness}}
+	for key, value := range map[string]string{
+		"app_id": filter.AppID, "agent_id": filter.AgentID, "user_id": filter.UserID,
+		"status": filter.Status, "search_query": filter.Search, "cursor": filter.Cursor,
+		"label": filter.Label, "spawned_by": filter.SpawnedBy,
+	} {
+		if value != "" {
+			query.Set(key, value)
+		}
+	}
+	if filter.Limit != 0 {
+		query.Set("limit", strconv.Itoa(filter.Limit))
+	}
+	if filter.Offset != 0 {
+		query.Set("offset", strconv.Itoa(filter.Offset))
+	}
+	if filter.UpdatedAfter != nil {
+		query.Set("updated_after", filter.UpdatedAfter.Format(time.RFC3339Nano))
+	}
+	if len(filter.AgentIDs) > 0 {
+		query["configured_agent_id"] = filter.AgentIDs
+	}
 	err := c.get(ctx, sessions, query, &result)
 	return result, err
 }
@@ -172,6 +246,25 @@ func (c *Client) ListCheckpoints(ctx context.Context, session, namespace, before
 	query := url.Values{"list": {"true"}, "checkpoint_ns": {namespace}, "before": {before}, "limit": {strconv.Itoa(limit)}}
 	err := c.get(ctx, sessionPath(session)+"/checkpoints", query, &result)
 	return result.IDs, err
+}
+
+// ListCheckpointTuples returns one page of checkpoints and their pending
+// writes. Optional metadata is a JSON object matched by containment.
+func (c *Client) ListCheckpointTuples(ctx context.Context, session, namespace, before string, limit int, metadata json.RawMessage) ([]CheckpointTuple, error) {
+	var result struct {
+		Tuples []CheckpointTuple `json:"checkpoint_tuples"`
+	}
+	query := url.Values{
+		"list": {"true"}, "include_tuples": {"true"}, "checkpoint_ns": {namespace}, "before": {before},
+	}
+	if limit != 0 {
+		query.Set("limit", strconv.Itoa(limit))
+	}
+	if len(metadata) > 0 {
+		query.Set("metadata", string(metadata))
+	}
+	err := c.get(ctx, sessionPath(session)+"/checkpoints", query, &result)
+	return result.Tuples, err
 }
 
 func (c *Client) PutWrites(ctx context.Context, session, namespace, checkpoint string, epoch int64, writes []PendingWrite) error {
@@ -251,6 +344,48 @@ func (c *Client) ReadBlob(ctx context.Context, session string, ref BlobRef) ([]b
 	}
 	err := c.http.Call(ctx, sessionPath(session)+"/blobs:read", ref, &result, false)
 	return result.Data, err
+}
+
+// EncodePayload keeps up to 256 KiB inline and stages larger values for
+// publication in a checkpoint, event, or session KV update.
+func (c *Client) EncodePayload(ctx context.Context, session string, epoch int64, data []byte) (Payload, error) {
+	if len(data) <= inlinePayloadLimit {
+		inline := make([]byte, len(data))
+		copy(inline, data)
+		return Payload{Inline: inline}, nil
+	}
+	ref, err := c.StageBlob(ctx, session, epoch, data)
+	if err != nil {
+		return Payload{}, err
+	}
+	if !matchesBlob(data, ref) {
+		return Payload{}, contracts.NewError(contracts.ErrInvalid, "staged journal blob differs from its descriptor")
+	}
+	return Payload{Blob: &ref}, nil
+}
+
+// DecodePayload loads a staged or inline value. Blob content is returned
+// only after checking the committed byte count and SHA-256 digest.
+func (c *Client) DecodePayload(ctx context.Context, session string, payload Payload) ([]byte, error) {
+	if payload.Blob == nil && payload.Inline != nil {
+		return payload.Inline, nil
+	}
+	if payload.Blob == nil || payload.Inline != nil {
+		return nil, contracts.NewError(contracts.ErrInvalid, "expected exactly one journal payload representation")
+	}
+	data, err := c.ReadBlob(ctx, session, *payload.Blob)
+	if err != nil {
+		return nil, err
+	}
+	if !matchesBlob(data, *payload.Blob) {
+		return nil, contracts.NewError(contracts.ErrInvalid, "journal blob differs from its descriptor")
+	}
+	return data, nil
+}
+
+func matchesBlob(data []byte, ref BlobRef) bool {
+	digest := sha256.Sum256(data)
+	return int64(len(data)) == ref.SizeBytes && strings.EqualFold(ref.SHA256, hex.EncodeToString(digest[:]))
 }
 
 func (c *Client) get(ctx context.Context, path string, query url.Values, out any) error {

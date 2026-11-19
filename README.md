@@ -2,7 +2,7 @@
 
 Весь код платформы собран в одном репозитории. Исходники разложены по папкам в [`services/`](services/). В [`platform/`](platform/) лежат общие файлы сборки, Compose, интеграционные тесты и документация.
 
-Снимок исходного кода соответствует ревизии AHP `68a169b4`.
+Базовая ревизия платформы — `68a169b4`. Компактный контур State обновляется в этом монорепозитории.
 
 ## Посервисный каталог
 
@@ -10,7 +10,7 @@
 |---|---|
 | **Новый State Store** | [Хранилище](services/state-store/internal/statejournal) · [схема PostgreSQL](services/state-store/internal/statejournal/schema.sql) |
 | **Новый State API** | [Точка входа](services/state-api/cmd/state-api) · [HTTP API](services/state-api/internal/statejournal/http.go) · [запуск и настройка](services/state-api/docs/compact-state-service.md) |
-| **Адаптеры харнессов** | [LangGraph](services/harness-adapters/sdk/python/ahp_state/journal_checkpointer.py) · [ADK](services/harness-adapters/sdk/python/ahp_state/journal_adk.py) · [DeepSeek](services/harness-adapters/adapters/deepseek) · [Hermes](services/harness-adapters/adapters/hermes) · [OpenClaw](services/harness-adapters/adapters/openclaw) · [проверки восстановления](services/harness-adapters/profiling/state-journal) |
+| **Адаптеры харнессов** | [LangGraph](services/sdk/sdk/python/ahp_state/journal_checkpointer.py) · [ADK](services/sdk/sdk/python/ahp_state/journal_adk.py) · [DeepSeek](services/harness-adapters/adapters/deepseek) · [Hermes](services/harness-adapters/adapters/hermes) · [OpenClaw](services/harness-adapters/adapters/openclaw) · [проверки восстановления](services/harness-adapters/profiling/state-journal) |
 | State API для thread/run | [HTTP API](services/state-service/internal/stateapi) · [хранилище](services/state-service/internal/state) |
 | Identity | [Сервис](services/identity-service/internal/identity) · [HTTP API](services/identity-service/internal/identityapi) |
 | Model Gateway | [Маршрутизация и провайдеры](services/model-gateway/internal/model) · [HTTP API](services/model-gateway/internal/modelapi) |
@@ -32,7 +32,7 @@
 
 ## Сборка из одного клона
 
-Для подготовки дерева нужны Git и Python 3.9+. Для сборки бинарников нужен Go 1.26+.
+Для подготовки дерева нужен Python 3.9+. Поддерживаются Git-клон и распакованный исходный архив. Для сборки бинарников нужен Go 1.26+.
 
 ```bash
 git clone https://github.com/noesskeetit/ahp.git

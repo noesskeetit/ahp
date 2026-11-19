@@ -15,7 +15,7 @@ def build(ctx):                      # the only required entry point
 
 ```dockerfile
 FROM python:3.11-slim
-RUN pip install "ahp-langgraph[langgraph]"              # the SDK, from the platform index
+RUN pip install "ahp-state[langgraph]"              # the SDK, from the platform index
 COPY my_agent/ /app/my_agent/
 ENV PYTHONUNBUFFERED=1 AHP_AGENT_MODULE=my_agent.agent AHP_AGENT_ENTRY=build
 CMD ["python", "-m", "ahp_state.container"]

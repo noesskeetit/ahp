@@ -1,4 +1,6 @@
 import https from 'node:https';
+import {createHash} from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
 import {readFileSync} from 'node:fs';
 
 export class JournalHTTPError extends Error {
@@ -9,6 +11,10 @@ export class JournalHTTPError extends Error {
     this.outcomeUnknown = outcomeUnknown;
   }
 }
+
+const API = '/v1/state';
+const sessions = API + '/sessions';
+const sessionPath = id => sessions + '/' + encodeURIComponent(id);
 
 export class CompactJournalClient {
   constructor(config) {
@@ -38,13 +44,21 @@ export class CompactJournalClient {
     });
   }
 
-  async request(method, path, {body, query} = {}) {
+  async request(method, path, {body, query, signal} = {}) {
     const url = new URL(path, this.origin);
     if (url.origin !== this.origin.origin || !url.pathname.startsWith('/v1/state/')) {
       throw new Error('Expected a relative State API route');
     }
-    if (query) url.search = new URLSearchParams(query).toString();
-    return await this.#send(method, url, body);
+    if (query instanceof URLSearchParams) url.search = query.toString();
+    else if (query) {
+      const parameters = new URLSearchParams();
+      for (const [key, value] of Object.entries(query)) {
+        if (value === undefined) continue;
+        for (const item of Array.isArray(value) ? value : [value]) parameters.append(key, item);
+      }
+      url.search = parameters.toString();
+    }
+    return await this.#send(method, url, body, signal);
   }
 
   async requestTool(operation, body) {
@@ -54,7 +68,8 @@ export class CompactJournalClient {
     return await this.#send('POST', new URL('/v1/tools/' + operation, this.origin), body);
   }
 
-  async #send(method, url, body) {
+  async #send(method, url, body, signal) {
+    signal?.throwIfAborted();
     const token = await this.tokenSource();
     if (typeof token !== 'string' || !token.trim()) throw new JournalHTTPError(0, 'FORBIDDEN');
     const mutation = method !== 'GET';
@@ -66,7 +81,8 @@ export class CompactJournalClient {
     }
     return new Promise((resolve, reject) => {
       const unknown = () => reject(new JournalHTTPError(0, 'TRANSPORT', mutation));
-      const request = https.request(url, {agent: this.agent, method, headers}, response => {
+      const onError = () => signal?.aborted ? reject(signal.reason) : unknown();
+      const request = https.request(url, {agent: this.agent, method, headers, signal}, response => {
         const chunks = [];
         let size = 0;
         response.on('data', chunk => {
@@ -75,27 +91,183 @@ export class CompactJournalClient {
           chunks.push(chunk);
         });
         response.on('end', () => {
+          const status = response.statusCode;
+          const success = status >= 200 && status < 300;
+          const text = Buffer.concat(chunks).toString('utf8').trim();
           let parsed;
-          try {
-            parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          } catch {
-            reject(new JournalHTTPError(response.statusCode, 'INVALID_RESPONSE', mutation));
-            return;
+          if (text) {
+            try {
+              parsed = JSON.parse(text);
+            } catch {
+              reject(new JournalHTTPError(status, 'INVALID_RESPONSE', mutation));
+              return;
+            }
           }
-          if (response.statusCode === 200) {
-            resolve(parsed);
-          } else {
-            reject(new JournalHTTPError(response.statusCode, parsed.reason || parsed.code || 'HTTP_ERROR',
-              mutation && response.statusCode >= 500));
-          }
+          if (success) resolve(parsed);
+          else reject(new JournalHTTPError(status, parsed?.reason || parsed?.code || 'HTTP_ERROR',
+            mutation && status >= 500));
         });
-        response.on('aborted', unknown);
-        response.on('error', unknown);
+        response.on('aborted', onError);
+        response.on('error', onError);
       });
       request.setTimeout(15000, () => request.destroy());
-      request.on('error', unknown);
+      request.on('error', onError);
       request.end(encoded);
     });
+  }
+
+  acquireSession(body) {
+    return this.request('POST', sessions + ':acquire', {body});
+  }
+
+  heartbeatLease(id, epoch, {ttlMs, signal} = {}) {
+    return this.request('POST', sessionPath(id) + ':heartbeat', {
+      body: {lease_epoch: epoch, ttl_ms: ttlMs}, signal,
+    });
+  }
+
+  async releaseLease(id, epoch, status) {
+    await this.request('POST', sessionPath(id) + ':heartbeat', {
+      body: {lease_epoch: epoch, release: true, status},
+    });
+  }
+
+  startHeartbeat(id, epoch, {ttlMs = 30000, intervalMs = ttlMs / 3, controller = new AbortController()} = {}) {
+    if (!Number.isFinite(intervalMs) || intervalMs < 1 || intervalMs >= ttlMs) {
+      throw new RangeError('Heartbeat interval must be positive and shorter than the lease TTL');
+    }
+    const stop = new AbortController();
+    const signal = stop.signal;
+    const abort = () => stop.abort(controller.signal.reason);
+    if (controller.signal.aborted) abort();
+    else controller.signal.addEventListener('abort', abort, {once: true});
+    let fenced = false;
+    let error;
+    const done = (async () => {
+      while (!signal.aborted) {
+        try {
+          await delay(intervalMs, undefined, {signal});
+          await this.heartbeatLease(id, epoch, {ttlMs, signal});
+          error = undefined;
+        } catch (failure) {
+          if (signal.aborted) return;
+          error = failure;
+          if (failure?.code !== 'TRANSPORT' && !(failure?.status >= 500)) {
+            fenced = failure?.code === 'STALE_EPOCH';
+            controller.abort(failure);
+            return;
+          }
+        }
+      }
+    })().finally(() => controller.signal.removeEventListener('abort', abort));
+    return {
+      get fenced() { return fenced; },
+      get error() { return error; },
+      signal: controller.signal,
+      done,
+      stop: () => { stop.abort(); return done; },
+    };
+  }
+
+  enqueueTurn(body) {
+    return this.request('POST', sessions + ':enqueue', {body});
+  }
+
+  claimTurn(body = {}) {
+    return this.request('POST', sessions + ':claim-turn', {body});
+  }
+
+  getTurnStatus(id) {
+    return this.request('GET', sessionPath(id));
+  }
+
+  inspectSession(id) {
+    return this.request('GET', sessionPath(id), {query: {view: 'resume'}});
+  }
+
+  listSessions(query) {
+    return this.request('GET', sessions, {query});
+  }
+
+  listCatalog(query) {
+    return this.request('GET', sessions, {query: {...query, view: 'catalog'}});
+  }
+
+  appendEvents(id, body) {
+    return this.request('POST', sessionPath(id) + '/events:append', {body});
+  }
+
+  getEvents(id, query) {
+    return this.request('GET', sessionPath(id) + '/events', {query});
+  }
+
+  putCheckpoint(id, body) {
+    return this.request('POST', sessionPath(id) + '/checkpoints', {body});
+  }
+
+  getCheckpoint(id, query) {
+    return this.request('GET', sessionPath(id) + '/checkpoints', {query});
+  }
+
+  listCheckpoints(id, {metadata, ...query} = {}) {
+    return this.request('GET', sessionPath(id) + '/checkpoints', {
+      query: {...query, list: true, metadata: metadata === undefined ? undefined : JSON.stringify(metadata)},
+    });
+  }
+
+  async putWrites(id, checkpointId, body) {
+    await this.request('POST', sessionPath(id) + '/checkpoints/' + encodeURIComponent(checkpointId) + '/writes', {body});
+  }
+
+  getKV(query) {
+    return this.request('GET', API + '/kv', {query});
+  }
+
+  mutateKV(body) {
+    return this.request('POST', API + '/kv:mutate', {body});
+  }
+
+  getChatHistory(id, query) {
+    return this.request('GET', sessionPath(id) + '/chat-history', {query});
+  }
+
+  stageBlob(id, epoch, data) {
+    return this.request('POST', sessionPath(id) + '/blobs:stage', {
+      body: {lease_epoch: epoch, data: Buffer.from(data).toString('base64')},
+    });
+  }
+
+  async readBlob(id, ref) {
+    const reply = await this.request('POST', sessionPath(id) + '/blobs:read', {body: ref});
+    const data = Buffer.from(reply.data, 'base64');
+    if (data.length !== ref.size_bytes || createHash('sha256').update(data).digest('hex') !== ref.sha256) {
+      throw new Error('Journal blob does not match its descriptor');
+    }
+    return data;
+  }
+
+  beginStandaloneTool(id, body) {
+    return this.request('POST', sessionPath(id) + '/tools:begin-standalone', {body});
+  }
+
+  getToolIntent(sessionId, callId) {
+    return this.request('GET', API + '/aux:mutate', {query: {session_id: sessionId, call_id: callId}});
+  }
+
+  getUserState(namespace) {
+    return this.request('GET', API + '/aux:mutate', {query: {state_namespace: namespace}});
+  }
+
+  async mutateToolIntent(body) {
+    await this.request('POST', API + '/intents:mutate', {body});
+  }
+
+  async deleteSession(id) {
+    await this.request('DELETE', sessionPath(id));
+  }
+
+  async setLegalHold(id, held) {
+    await this.request('PATCH', sessionPath(id) + '/legal-hold', {body: {held}});
   }
 
   close() {
