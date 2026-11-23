@@ -292,7 +292,7 @@ func injectorWriteBody(w http.ResponseWriter, r *http.Request, path, session str
 			Epoch int64 `json:"lease_epoch"`
 			journal.CheckpointCommit
 		}
-		return injectorJSON(w, r, &checkpoint, 0)
+		return injectorJSON(w, r, &checkpoint, 3<<20)
 	case session + "/blobs:stage":
 		var stage struct {
 			Epoch int64  `json:"lease_epoch"`
@@ -324,7 +324,7 @@ func injectorWriteBody(w http.ResponseWriter, r *http.Request, path, session str
 				Namespace string                 `json:"namespace"`
 				Writes    []journal.PendingWrite `json:"writes"`
 			}
-			return injectorJSON(w, r, &writes, 0)
+			return injectorJSON(w, r, &writes, 3<<20)
 		}
 	}
 	return nil, false

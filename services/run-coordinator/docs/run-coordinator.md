@@ -75,3 +75,25 @@ A trusted process worker receives `AHP_INJECTOR_SOCKET` and uses Go SDK `NewUnix
 ## Acceptance
 
 Run the State, Coordinator, Runtime, Compute and Go SDK suites with `-race` on disposable PostgreSQL 18 and MinIO. Run packages sequentially against the same database because journal tests rerun migrations. The process integration tests exercise the coordinator, State, Identity and Runtime over mutual TLS and the guest SDK over its Unix socket. Firecracker boot, vsock inside a real guest and hypervisor isolation need a separate Linux host with `/dev/kvm` and delegated cgroup v2.
+
+### Live PostgreSQL and Firecracker acceptance
+
+On a Linux KVM test host, compile the assembled Run Coordinator test package for the host and guest architecture.
+
+```sh
+CGO_ENABLED=0 go test -c -o /tmp/ahp-runcoord.test ./internal/runcoord
+```
+
+Put that binary in the guest's ext4 image. The image starts the guest test as a child of init, with sysfs mounted and a clean environment. Init stays alive while the guest owns the turn.
+
+```sh
+env -i PATH=/bin HOME=/tmp AHP_FC_E2E_GUEST=1 /bin/ahp-runcoord.test -test.run '^TestV32FirecrackerGuest$'
+```
+
+In the Linux test host, configure `AHP_FC_BINARY`, `AHP_FC_KERNEL` and `AHP_FC_ROOTFS`. Point `AHP_FC_E2E_CGROUP` at a writable delegated cgroup v2 directory and `AHP_JOURNAL_TEST_DATABASE_URL` at a disposable PostgreSQL 18 database with the `ahp_carbon_compact` prefix. A guest kernel needs built-in virtio-vsock and ext4 support. The test creates short per-attempt paths under `/tmp` and disables guest network interfaces other than loopback.
+
+```sh
+AHP_FC_E2E=1 /tmp/ahp-runcoord.test -test.run '^TestV32FirecrackerPostgresE2E$' -test.count=2 -test.v
+```
+
+The test uses the real coordinator, mTLS handlers, workload grants and State Store. Two tenants use the same public conversation ID. One guest processes a follow-up in place. The other saves a checkpoint, records a dispatch and freezes. The replacement reads the checkpoint and the pending intent, checks the dispatch decision, and finishes the SSE stream. A test event counts fixture tool invocations. The assertions also verify that the old grant is revoked and Firecracker resources are retired.

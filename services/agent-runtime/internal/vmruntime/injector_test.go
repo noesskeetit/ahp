@@ -359,6 +359,92 @@ func TestInjectorPreservesAllowedJSONAndStateSessionPaths(t *testing.T) {
 	}
 }
 
+func TestInjectorCheckpointBodyLimits(t *testing.T) {
+	guest := injectorTestGuest()
+	socket := injectorTestSocket(t)
+	type forwardedRequest struct{ path, body string }
+	forwarded := make(chan forwardedRequest, 4)
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read forwarded checkpoint body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		forwarded <- forwardedRequest{r.RequestURI, string(body)}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	i, err := NewInjector(InjectorConfig{
+		StateURL: upstream.URL,
+		ClientFor: func(context.Context, contracts.Scope) (*http.Client, error) {
+			return upstream.Client(), nil
+		},
+		MintToken: func(context.Context, Execution) (string, error) {
+			return injectorTestJWT(time.Now().Add(5 * time.Minute)), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := i.Start(t.Context(), guest, socket); err != nil {
+		t.Fatal(err)
+	}
+	defer i.Close(guest)
+	client := injectorTestClient(socket)
+	defer client.CloseIdleConnections()
+
+	// Each inline value fits the State API's 256 KiB limit. Their aggregate
+	// encoding exceeds the injector's default body limit before any padding.
+	payload := journal.Payload{Inline: []byte(strings.Repeat("x", 256<<10))}
+	writes := make([]journal.PendingWrite, 4)
+	for n := range writes {
+		writes[n] = journal.PendingWrite{TaskID: "task", Index: int32(n), Channel: "result", Codec: "raw", Payload: payload}
+	}
+	checkpoint := journal.CheckpointCommit{
+		TurnSeq: 7, Key: "check-1", Writes: writes,
+		Checkpoint: journal.Checkpoint{
+			ID: "cp-1", Namespace: "ns", Codec: "raw", Metadata: json.RawMessage(`{}`),
+			ChannelVersions: json.RawMessage(`{}`), Payload: payload,
+		},
+	}
+	const maxBody = 3 << 20
+	const session = "/v1/state/sessions/session%2Falpha"
+	for _, route := range []struct {
+		name, path string
+		body       any
+	}{
+		{"commit", session + "/checkpoints", struct {
+			Epoch int64 `json:"lease_epoch"`
+			journal.CheckpointCommit
+		}{8, checkpoint}},
+		{"pending_writes", session + "/checkpoints/cp-1/writes", map[string]any{
+			"lease_epoch": 8, "turn_seq": 7, "namespace": "ns", "writes": writes,
+		}},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			raw, err := json.Marshal(route.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(raw) <= 1<<20 || len(raw) > maxBody {
+				t.Fatalf("fixture size %d does not exercise the checkpoint limit", len(raw))
+			}
+			atLimit := string(raw) + strings.Repeat(" ", maxBody-len(raw))
+			resp, body := injectorTestRequest(t, client, http.MethodPost, route.path, atLimit)
+			if resp.StatusCode != http.StatusNoContent {
+				t.Errorf("%d-byte checkpoint body (%d-byte JSON) returned %d: %s", len(atLimit), len(raw), resp.StatusCode, body)
+			} else if got := <-forwarded; got.path != route.path || got.body != atLimit {
+				t.Errorf("upstream received altered checkpoint request for %s (%d bytes)", got.path, len(got.body))
+			}
+			resp, body = injectorTestRequest(t, client, http.MethodPost, route.path, atLimit+" ")
+			if resp.StatusCode != http.StatusForbidden || len(forwarded) != 0 {
+				t.Errorf("oversized checkpoint body returned %d with %d upstream requests: %s", resp.StatusCode, len(forwarded), body)
+			}
+		})
+	}
+}
+
 func TestInjectorRejectsUpstreamRedirectAndRefreshesToken(t *testing.T) {
 	guest := injectorTestGuest()
 	socket := injectorTestSocket(t)

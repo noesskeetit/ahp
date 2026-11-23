@@ -39,7 +39,7 @@ type processIntegration struct {
 	aborted   chan struct{}
 	hostDir   string
 	coord     *Coordinator
-	driver    *vmruntime.ProcessDriver
+	driver    vmruntime.Driver
 	injector  *vmruntime.Injector
 	manager   vmruntime.Manager
 	workerDir string
@@ -52,6 +52,27 @@ type processCaller struct {
 }
 
 func setupProcessIntegration(t *testing.T, scopes func(string) []contracts.Scope) *processIntegration {
+	t.Helper()
+	return setupV32RuntimeIntegration(t, scopes, "chat", processFixtureDriver)
+}
+
+type v32FixtureDriver func(*testing.T, string) (vmruntime.Driver, string)
+
+func processFixtureDriver(t *testing.T, dir string) (vmruntime.Driver, string) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerDir := filepath.Join(dir, "p")
+	driver, err := vmruntime.NewProcessDriver(workerDir, executable, "-test.run=^TestV32CoordinatorProcessGuest$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return driver, workerDir
+}
+
+func setupV32RuntimeIntegration(t *testing.T, scopes func(string) []contracts.Scope, conversation string, fixtureDriver v32FixtureDriver) *processIntegration {
 	t.Helper()
 	ctx, pool, db := openPG(t)
 	ids := identity.New(pool)
@@ -128,15 +149,7 @@ func setupProcessIntegration(t *testing.T, scopes func(string) []contracts.Scope
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	workerDir := filepath.Join(dir, "p")
-	driver, err := vmruntime.NewProcessDriver(workerDir, executable, "-test.run=^TestV32CoordinatorProcessGuest$")
-	if err != nil {
-		t.Fatal(err)
-	}
+	driver, workerDir := fixtureDriver(t, dir)
 	host := vmruntime.Host{ID: "process-test", Dir: filepath.Join(dir, "s"), Injector: injector, Driver: driver}
 	if err := os.Mkdir(host.Dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -172,7 +185,7 @@ func setupProcessIntegration(t *testing.T, scopes func(string) []contracts.Scope
 	callers := make(map[contracts.Scope]processCaller)
 	for _, scope := range workers {
 		edge := contracts.Scope{Tenant: scope.Tenant, Deployment: "user-edge", Subject: "edge"}
-		callers[scope] = processCaller{origin: coordServer.URL + "/v1/agents/" + scope.Deployment + "/sessions/chat",
+		callers[scope] = processCaller{origin: coordServer.URL + "/v1/agents/" + scope.Deployment + "/sessions/" + conversation,
 			token: signedCaller(t, signer, humanCaller(scope.Tenant, scope.Subject)), client: pki.client(t, coordServer, edge)}
 	}
 	return &processIntegration{ctx: ctx, state: db.store, identity: ids, verifier: verify, signer: signer,
@@ -210,15 +223,22 @@ func (p *processIntegration) send(t *testing.T, scope contracts.Scope, key, mode
 
 func (p *processIntegration) wait(t *testing.T, what string, check func() bool) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(p.ctx, 8*time.Second)
+	p.waitFor(t, 8*time.Second, what, check)
+}
+
+func (p *processIntegration) waitFor(t *testing.T, timeout time.Duration, what string, check func() bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(p.ctx, timeout)
 	defer cancel()
 	tick := time.NewTicker(15 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		failures, _ := filepath.Glob(filepath.Join(p.workerDir, "*", "worker.error"))
-		for _, path := range failures {
-			if data, err := os.ReadFile(path); err == nil {
-				t.Fatalf("guest %s: %s", filepath.Base(filepath.Dir(path)), data)
+		if p.workerDir != "" {
+			failures, _ := filepath.Glob(filepath.Join(p.workerDir, "*", "worker.error"))
+			for _, path := range failures {
+				if data, err := os.ReadFile(path); err == nil {
+					t.Fatalf("guest %s: %s", filepath.Base(filepath.Dir(path)), data)
+				}
 			}
 		}
 		if check() {
@@ -293,6 +313,10 @@ func runV32CoordinatorProcessGuest(parent context.Context, socket string) error 
 	default:
 		return fmt.Errorf("unsupported process test mode %q", input.Mode)
 	}
+	return runV32WarmGuest(ctx, sdk, boot, turn, input)
+}
+
+func runV32WarmGuest(ctx context.Context, sdk *stateclient.Client, boot journal.RuntimeBootstrap, turn stateclient.ClaimedTurn, input processInput) error {
 	var ack journal.SteerAck
 	var steer string
 	var head int64
