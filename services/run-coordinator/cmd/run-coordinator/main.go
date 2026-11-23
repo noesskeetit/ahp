@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -22,7 +21,6 @@ import (
 	"github.com/ahp-platform/ahp/pkg/auth"
 	"github.com/ahp-platform/ahp/pkg/contracts"
 	ahpotel "github.com/ahp-platform/ahp/pkg/otel"
-	"github.com/ahp-platform/ahp/pkg/transport"
 	statesdk "github.com/ahp-platform/ahp/sdk/go/state/journal"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
@@ -41,16 +39,12 @@ func main() {
 func run(ctx context.Context, env func(string) string) error {
 	for _, key := range []string{
 		"AHP_RC_STATE_URL", "AHP_RC_RUNTIME_URL", "AHP_RC_TLS_CERT", "AHP_RC_TLS_KEY", "AHP_RC_CA",
-		"AHP_RC_STATE_TOKEN_FILE", "AHP_RC_JWT_ISSUER", "AHP_RC_JWT_KID", "AHP_RC_JWT_PUBLIC_KEY",
-		"AHP_RC_NOTIFY_DSN",
+		"AHP_RC_STATE_TOKEN_FILE", "AHP_RC_RUNTIME_TOKEN_FILE", "AHP_RC_JWT_ISSUER", "AHP_RC_JWT_KID",
+		"AHP_RC_JWT_PUBLIC_KEY", "AHP_RC_NOTIFY_DSN", "AHP_RC_AGENT_ACCESS_FILE",
 	} {
 		if env(key) == "" {
 			return fmt.Errorf("%s is required", key)
 		}
-	}
-	scope := contracts.Scope{Tenant: env("AHP_RC_TENANT"), Deployment: env("AHP_RC_DEPLOYMENT"), Subject: env("AHP_RC_SUBJECT")}
-	if err := scope.Validate(); err != nil {
-		return err
 	}
 	cert, err := tls.LoadX509KeyPair(env("AHP_RC_TLS_CERT"), env("AHP_RC_TLS_KEY"))
 	if err != nil {
@@ -71,10 +65,7 @@ func run(ctx context.Context, env func(string) string) error {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	state, err := statesdk.New(statesdk.Config{BaseURL: env("AHP_RC_STATE_URL"), HTTPClient: client,
-		TokenSource: func(ctx context.Context) (string, error) {
-			token, err := os.ReadFile(env("AHP_RC_STATE_TOKEN_FILE"))
-			return strings.TrimSpace(string(token)), err
-		}})
+		TokenSource: tokenFileSource(env("AHP_RC_STATE_TOKEN_FILE"))})
 	if err != nil {
 		return err
 	}
@@ -95,6 +86,21 @@ func run(ctx context.Context, env func(string) string) error {
 		return errors.New("coordinator JWT public key must be Ed25519")
 	}
 	verify := auth.NewVerifier(env("AHP_RC_JWT_ISSUER"), map[string]ed25519.PublicKey{env("AHP_RC_JWT_KID"): pub})
+	accessFile, err := os.Open(env("AHP_RC_AGENT_ACCESS_FILE"))
+	if err != nil {
+		return fmt.Errorf("open coordinator agent access policy: %w", err)
+	}
+	authorize, err := runcoord.ReadAgentAccess(accessFile)
+	accessFile.Close()
+	if err != nil {
+		return err
+	}
+	policy := runcoord.AccessPolicy{
+		Verifier: verify, UserAudience: env("AHP_RC_USER_AUDIENCE"), AuthorizeAgent: authorize,
+		BrokerWorkloadIDs:       splitList(env("AHP_RC_BROKER_WORKLOAD_IDS")),
+		PlatformEdgeWorkloadIDs: splitList(env("AHP_RC_PLATFORM_EDGE_WORKLOAD_IDS")),
+		UserEdgeDeployments:     splitList(env("AHP_RC_USER_EDGE_DEPLOYMENTS")),
+	}
 	shutdown, err := ahpotel.Setup(ctx, ahpotel.Config{ServiceName: "ahp-run-coordinator", Endpoint: env("AHP_RC_OTLP_ENDPOINT")})
 	if err != nil {
 		return err
@@ -109,20 +115,12 @@ func run(ctx context.Context, env func(string) string) error {
 	bus := runcoord.NewPGSignalBus(pool)
 	runtimeClient := *client
 	runtimeClient.Timeout = 90 * time.Second
-	dispatcher := runcoord.HTTPDispatcher{BaseURL: env("AHP_RC_RUNTIME_URL"), Client: &runtimeClient}
-	if tokenFile := env("AHP_RC_RUNTIME_TOKEN_FILE"); tokenFile != "" {
-		dispatcher.TokenSource = func(context.Context) (string, error) {
-			token, err := os.ReadFile(tokenFile)
-			return strings.TrimSpace(string(token)), err
-		}
-	}
-	c := &runcoord.Coordinator{Scope: scope, State: state, Signals: bus, Dispatcher: dispatcher}
-	protected := transport.Task(verify, "ahp", "run.coordinate", func(_ context.Context, claims auth.Claims, capability string) error {
-		if !slices.Contains(claims.Capabilities, capability) {
-			return contracts.NewError(contracts.ErrForbidden, "task cannot call coordinator")
-		}
-		return nil
-	})(c.Handler())
+	dispatcher := runcoord.HTTPDispatcher{BaseURL: env("AHP_RC_RUNTIME_URL"), Client: &runtimeClient,
+		TokenSource: tokenFileSource(env("AHP_RC_RUNTIME_TOKEN_FILE"))}
+	global := state.Coordinator()
+	c := &runcoord.Coordinator{GlobalState: global, Signals: bus, Dispatcher: dispatcher, AccessPolicy: policy,
+		StateFor: func(scope contracts.Scope) runcoord.State { return global.ForScope(scope) }}
+	protected := c.Handler()
 	instrumented := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		parent := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 		ctx, span := otel.Tracer("ahp-run-coordinator").Start(parent, "runCoordinator.HTTP")
@@ -149,4 +147,21 @@ func run(ctx context.Context, env func(string) string) error {
 		defer done()
 		return server.Shutdown(grace)
 	}
+}
+
+func tokenFileSource(path string) func(context.Context) (string, error) {
+	return func(context.Context) (string, error) {
+		token, err := os.ReadFile(path)
+		return strings.TrimSpace(string(token)), err
+	}
+}
+
+func splitList(value string) []string {
+	var entries []string
+	for entry := range strings.SplitSeq(value, ",") {
+		if entry = strings.TrimSpace(entry); entry != "" {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
 }

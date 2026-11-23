@@ -19,6 +19,8 @@ go run ./cmd/state-api
 | `AHP_STATE_TLS_CERT`, `AHP_STATE_TLS_KEY`, `AHP_STATE_CLIENT_CA` | Server TLS material and trusted workload CA |
 | `AHP_STATE_TOKEN_ISSUER`, `AHP_STATE_TOKEN_KID`, `AHP_STATE_TOKEN_PUBLIC_KEY` | JWT trust settings and path to an Ed25519 public key PEM |
 | `AHP_STATE_GRANTS_FILE` | Optional path to locally authorized scope and grant records |
+| `AHP_STATE_IDENTITY_DSN` | Live Identity PostgreSQL connection for task authorization |
+| `AHP_STATE_COORDINATOR_WORKLOAD_IDS` | Comma-separated list of exact coordinator workload SPIFFE IDs |
 | `AHP_STATE_S3_ENDPOINT`, `AHP_STATE_S3_BUCKET` | S3 API host with optional port and existing private bucket |
 | `AHP_STATE_S3_ACCESS_KEY`, `AHP_STATE_S3_SECRET_KEY` | S3 credentials from the service's secret source |
 | `AHP_STATE_S3_TLS` | S3 TLS toggle, default `true` |
@@ -31,7 +33,7 @@ list as `"cap":["state"]`. Additional permissions require `state.shared` or
 `state.retention` in that list. An unrecognized grant ID does not confer a
 capability by itself.
 
-With `AHP_STATE_GRANTS_FILE` set, the local file is the authority. Replace the
+When only `AHP_STATE_GRANTS_FILE` is set, the local file is the authority. Replace the
 file atomically. The process watches for changes and reloads on SIGHUP. Invalid
 replacements deny access until a valid policy is loaded. This fixture grants
 access to a single subject.
@@ -74,6 +76,21 @@ reuse that payload and the original input position.
 The legacy RPC client, administration, and older deployments can still use
 the State RPC routes. The native routes do not transfer existing runs or
 legacy queue history.
+
+## VM coordination
+
+The global VM routes live under `/internal/v1/state/coordinator/`. The caller
+uses a verified workload certificate in `AHP_STATE_COORDINATOR_WORKLOAD_IDS` and
+an active grant with `state` and `state.coordinate`. In the all-in-one platform
+the policy comes from Identity. Configure `AHP_STATE_IDENTITY_DSN` to use the
+same live grants in the separate `state-api` process. Identity owns migration
+of that database. The local grant file and signed-token policies support
+scoped routes.
+
+The coordinator supplies the target tenant, deployment and subject in the
+session path. The API serves only `vm_managed` sessions on this prefix. Global
+reconciliation uses `after`, `after_tenant` and `after_session` together. The Go
+SDK exposes these operations through `Client.Coordinator()`.
 
 ## Verify
 

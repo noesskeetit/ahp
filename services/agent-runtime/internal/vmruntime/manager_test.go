@@ -242,10 +242,10 @@ WHERE tenant_id=$1 AND execution_id=$2`, e.Scope.Tenant, e.ID); err != nil {
 	close(finish)
 	expectCode(t, <-result, contracts.ErrConflict)
 	expectCode(t, host.StartOrAdopt(ctx, e, 1), contracts.ErrConflict)
-	if ok, err := p.Alive(ctx, Guest{e, 2}); err != nil || !ok {
+	if ok, err := p.Alive(ctx, Guest{Execution: e, Attempt: 2}); err != nil || !ok {
 		t.Fatalf("winner lost its process: %v, %v", ok, err)
 	}
-	if ok, _ := p.Alive(ctx, Guest{e, 1}); ok {
+	if ok, _ := p.Alive(ctx, Guest{Execution: e, Attempt: 1}); ok {
 		t.Fatal("superseded process is still live")
 	}
 	if _, err := grants.Evaluate(ctx, e.Scope, e.ID, "state"); err != nil {
@@ -256,7 +256,7 @@ WHERE tenant_id=$1 AND execution_id=$2`, e.Scope.Tenant, e.ID); err != nil {
 	if err := m.Fence(ctx, e); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := p.Alive(ctx, Guest{e, 2}); ok {
+	if ok, _ := p.Alive(ctx, Guest{Execution: e, Attempt: 2}); ok {
 		t.Fatal("fence completed with the winning process still live")
 	}
 	_, err := grants.Evaluate(ctx, e.Scope, e.ID, "state")
@@ -281,7 +281,7 @@ func TestFenceDoesNotAcknowledgeUnavailableHost(t *testing.T) {
 	if err := m.Fence(ctx, e); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := p.Alive(ctx, Guest{e, 1}); ok {
+	if ok, _ := p.Alive(ctx, Guest{Execution: e, Attempt: 1}); ok {
 		t.Fatal("fence acknowledged before process exit")
 	}
 }
@@ -302,13 +302,13 @@ func TestFenceFindsProcessWhenStartWasNeverConfirmed(t *testing.T) {
 		return Host{ID: host.ID, Dir: host.Dir, Driver: lostStartReply{p}}, nil
 	}
 	expectCode(t, broken.EnsureRunning(ctx, e), contracts.ErrUnavailable)
-	if active, _ := p.Alive(ctx, Guest{e, 1}); !active {
+	if active, _ := p.Alive(ctx, Guest{Execution: e, Attempt: 1}); !active {
 		t.Fatal("test did not leave a real child after the lost reply")
 	}
 	if err := m.Fence(ctx, e); err != nil {
 		t.Fatal(err)
 	}
-	if active, _ := p.Alive(ctx, Guest{e, 1}); active {
+	if active, _ := p.Alive(ctx, Guest{Execution: e, Attempt: 1}); active {
 		t.Fatal("fence did not stop the process in the unconfirmed slot")
 	}
 }

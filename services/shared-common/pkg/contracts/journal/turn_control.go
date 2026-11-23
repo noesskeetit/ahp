@@ -67,6 +67,13 @@ type CheckpointReceipt struct {
 	Control *TurnControlDelta `json:"control,omitempty"`
 }
 
+// ScopedSessionID maps a public conversation identifier to a VM journal key.
+func ScopedSessionID(scope contracts.Scope, conversationID string) string {
+	raw := scope.Tenant + "\x00" + scope.Deployment + "\x00" + scope.Subject + "\x00" + conversationID
+	sum := sha256.Sum256([]byte(raw))
+	return "vms-" + hex.EncodeToString(sum[:16])
+}
+
 func DeterministicExecutionID(scope contracts.Scope, session string, turnSeq, generation int64) string {
 	raw := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%d",
 		scope.Tenant, scope.Deployment, scope.Subject, session, turnSeq, generation)
@@ -95,9 +102,10 @@ type SessionSignal struct {
 	SessionID string          `json:"session_id"`
 }
 
-// VMReconcileCursor is a position within one status queue in one State scope.
+// VMReconcileCursor is a position in one status queue. TenantID is used for global paging.
 type VMReconcileCursor struct {
 	At        time.Time `json:"at"`
+	TenantID  string    `json:"tenant_id,omitempty"`
 	SessionID string    `json:"session_id"`
 }
 

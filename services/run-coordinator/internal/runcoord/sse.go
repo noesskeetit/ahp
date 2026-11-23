@@ -12,11 +12,7 @@ import (
 	"github.com/ahp-platform/ahp/pkg/transport"
 )
 
-func (c *Coordinator) stream(w http.ResponseWriter, r *http.Request, session string) {
-	if agent := r.PathValue("agent"); agent != "" && agent != c.Scope.Deployment {
-		transport.WriteError(w, r, contracts.NewError(contracts.ErrForbidden, "agent is outside coordinator scope"))
-		return
-	}
+func (c *Coordinator) stream(w http.ResponseWriter, r *http.Request, state State, session SessionSignal) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		transport.WriteError(w, r, contracts.NewError(contracts.ErrUnavailable, "stream flushing is unavailable"))
@@ -46,10 +42,10 @@ func (c *Coordinator) stream(w http.ResponseWriter, r *http.Request, session str
 	var signal <-chan struct{}
 	if c.Signals != nil {
 		var release func()
-		signal, release = c.Signals.Subscribe(SessionSignal{Scope: c.Scope, SessionID: session})
+		signal, release = c.Signals.Subscribe(session)
 		defer release()
 	}
-	if _, err := c.State.GetEvents(ctx, session, cursor, 1, ""); err != nil {
+	if _, err := state.GetEvents(ctx, session.SessionID, cursor, 1, ""); err != nil {
 		transport.WriteError(w, r, err)
 		return
 	}
@@ -78,13 +74,13 @@ func (c *Coordinator) stream(w http.ResponseWriter, r *http.Request, session str
 		return true
 	}
 	for {
-		page, err := c.State.GetEvents(ctx, session, cursor, 128, "")
+		page, err := state.GetEvents(ctx, session.SessionID, cursor, 128, "")
 		if err != nil {
 			write("error", 0, map[string]string{"code": "STATE_READ_FAILED"})
 			return
 		}
 		if !continuous(page, cursor) {
-			page, err = c.State.GetEvents(ctx, session, cursor, 128, "")
+			page, err = state.GetEvents(ctx, session.SessionID, cursor, 128, "")
 			if err != nil || !continuous(page, cursor) {
 				write("error", 0, map[string]any{"code": "INCOMPLETE_TAIL", "expected_seq": cursor + 1})
 				return

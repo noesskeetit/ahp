@@ -27,8 +27,10 @@ type Driver interface {
 }
 
 type Guest struct {
-	Execution Execution
-	Attempt   int64
+	Execution      Execution
+	Attempt        int64
+	InjectorSocket string
+	OnExit         func()
 }
 
 // ID is suitable for a local resource name and includes the attempt. A stop
@@ -37,10 +39,17 @@ func (g Guest) ID() string {
 	return fmt.Sprintf("exec-%s-%d", slotKey(g.Execution)[:24], g.Attempt)
 }
 
+type GuestInjector interface {
+	Start(context.Context, Guest, string) error
+	Close(Guest) error
+	Listening(Guest) bool
+}
+
 type Host struct {
-	ID     string
-	Dir    string
-	Driver Driver
+	ID       string
+	Dir      string
+	Driver   Driver
+	Injector GuestInjector
 }
 
 type slot struct {
@@ -58,20 +67,20 @@ func (h Host) StartOrAdopt(ctx context.Context, exec Execution, attempt int64) e
 			previous := Guest{Execution: exec, Attempt: s.Attempt}
 			if attempt == s.Attempt && s.Ready {
 				alive, err := h.Driver.Alive(ctx, previous)
-				if err != nil || alive {
+				if err != nil || alive && (h.Injector == nil || h.Injector.Listening(previous)) {
 					return err
 				}
 			}
 			// A process may exist even if its Start never returned. Clean up
 			// the recorded attempt before calling Start for any replacement.
-			if err := h.Driver.StopAndWait(ctx, previous); err != nil {
+			if err := h.stopGuest(ctx, previous); err != nil {
 				return err
 			}
 		}
 		if err := persistSlot(path, slot{Attempt: attempt}); err != nil {
 			return err
 		}
-		if err := h.Driver.Start(ctx, Guest{Execution: exec, Attempt: attempt}); err != nil {
+		if err := h.startGuest(ctx, Guest{Execution: exec, Attempt: attempt}); err != nil {
 			return err
 		}
 		return persistSlot(path, slot{Attempt: attempt, Ready: true})
@@ -83,8 +92,11 @@ func (h Host) Running(ctx context.Context, exec Execution, attempt int64) (alive
 		if s.Fenced || !s.Ready || s.Attempt != attempt {
 			return nil
 		}
-		var err error
-		alive, err = h.Driver.Alive(ctx, Guest{Execution: exec, Attempt: attempt})
+		guest := Guest{Execution: exec, Attempt: attempt}
+		if h.Injector != nil && !h.Injector.Listening(guest) {
+			return nil
+		}
+		alive, err = h.Driver.Alive(ctx, guest)
 		return err
 	})
 	return alive, err
@@ -99,11 +111,76 @@ func (h Host) FenceAndWait(ctx context.Context, exec Execution) error {
 		if s.Attempt == 0 {
 			return nil
 		}
-		if err := h.Driver.StopAndWait(ctx, Guest{Execution: exec, Attempt: s.Attempt}); err != nil {
+		if err := h.stopGuest(ctx, Guest{Execution: exec, Attempt: s.Attempt}); err != nil {
 			return err
 		}
 		return persistSlot(path, slot{Fenced: true})
 	})
+}
+
+func (h Host) startGuest(ctx context.Context, guest Guest) error {
+	if h.Injector == nil {
+		return h.Driver.Start(ctx, guest)
+	}
+	socket, err := h.injectorSocket(guest)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(socket)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return unavailable("cannot create private injector directory: " + err.Error())
+	}
+	st, err := os.Lstat(dir)
+	if err != nil || !st.IsDir() || st.Mode().Perm()&0o077 != 0 {
+		return unavailable("injector directory must be private")
+	}
+	guest.InjectorSocket = socket
+	owner := guest
+	guest.OnExit = func() { _ = h.Injector.Close(owner) }
+	if err := h.Injector.Start(ctx, guest, socket); err != nil {
+		return err
+	}
+	if err := h.Driver.Start(ctx, guest); err != nil {
+		return errors.Join(err, h.Injector.Close(guest))
+	}
+	return nil
+}
+
+func (h Host) stopGuest(ctx context.Context, guest Guest) error {
+	var closeErr error
+	if h.Injector != nil {
+		closeErr = h.Injector.Close(guest)
+	}
+	if stopErr := h.Driver.StopAndWait(ctx, guest); stopErr != nil {
+		return errors.Join(stopErr, closeErr)
+	}
+	if closeErr != nil || h.Injector == nil {
+		return closeErr
+	}
+	// Following a daemon restart no live Injector object may own this path.
+	// The old guest has now been stopped and the slot lock excludes a new one.
+	socket, err := h.injectorSocket(guest)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(socket)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || info.Mode().Type() != os.ModeSocket {
+		return unavailable("cannot confirm the stale injector socket")
+	}
+	if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return unavailable("cannot clear stale injector socket: " + err.Error())
+	}
+	return nil
+}
+
+func (h Host) injectorSocket(guest Guest) (string, error) {
+	if driver, ok := h.Driver.(interface{ InjectorSocket(Guest) (string, error) }); ok {
+		return driver.InjectorSocket(guest)
+	}
+	return filepath.Join(h.Dir, guest.ID(), "ahp.sock"), nil
 }
 
 func (h Host) withSlot(ctx context.Context, exec Execution, fn func(string, slot) error) error {

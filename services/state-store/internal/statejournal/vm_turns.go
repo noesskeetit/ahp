@@ -125,14 +125,9 @@ func (s *Store) ListRecoverableVMPage(ctx context.Context, scope contracts.Scope
 	if limit < 1 || limit > 1000 {
 		return result, contracts.NewError(contracts.ErrInvalid, "invalid VM reconcile limit")
 	}
-	var timestamp, ready string
-	switch status {
-	case SessionQueued:
-		timestamp, ready = "queued_at", "status='QUEUED' AND queued_at<=statement_timestamp()-interval '2 seconds'"
-	case SessionActive:
-		timestamp, ready = "lease_expires_at", "status='ACTIVE' AND turn_input_seq IS NOT NULL AND lease_expires_at<=statement_timestamp()"
-	default:
-		return result, contracts.NewError(contracts.ErrInvalid, "invalid VM reconcile status")
+	timestamp, ready, err := vmReconcileFilter(status)
+	if err != nil {
+		return result, err
 	}
 
 	var cursorTime *time.Time
@@ -170,4 +165,65 @@ func (s *Store) ListRecoverableVMPage(ctx context.Context, scope contracts.Scope
 		result.Sessions = append(result.Sessions, session)
 	}
 	return result, rows.Err()
+}
+
+// ListGlobalRecoverableVMPage uses the global queue indexes. The tenant is a
+// tie breaker because a session ID may appear in different tenants.
+func (s *Store) ListGlobalRecoverableVMPage(ctx context.Context, status string, after *journal.VMReconcileCursor, limit int) (journal.VMReconcilePage, error) {
+	var result journal.VMReconcilePage
+	if limit < 1 || limit > 1000 {
+		return result, contracts.NewError(contracts.ErrInvalid, "invalid VM reconcile limit")
+	}
+	timestamp, ready, err := vmReconcileFilter(status)
+	if err != nil {
+		return result, err
+	}
+	query := `
+		SELECT tenant_id,deployment_id,subject_id,session_id,turn_input_seq,lease_epoch,
+		       coalesce(lease_owner,''),status,harness_type,` + timestamp + `
+		FROM ahp_journal.sessions
+		WHERE execution_mode='vm_managed' AND ` + ready
+	args := []any{limit + 1}
+	if after != nil {
+		cursorTenant := contracts.Scope{Tenant: after.TenantID, Deployment: "cursor", Subject: "cursor"}
+		if after.At.IsZero() || cursorTenant.Validate() != nil || !validID(after.SessionID) {
+			return result, contracts.NewError(contracts.ErrInvalid, "invalid VM reconcile cursor")
+		}
+		query += ` AND (` + timestamp + `,tenant_id,session_id)>($2,$3,$4)`
+		args = append(args, after.At, after.TenantID, after.SessionID)
+	}
+	query += ` ORDER BY ` + timestamp + `,tenant_id,session_id LIMIT $1`
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return result, err
+	}
+	defer rows.Close()
+	result.Sessions = make([]journal.VMSession, 0, limit)
+	var last journal.VMReconcileCursor
+	for rows.Next() {
+		if len(result.Sessions) == limit {
+			result.Next = &last
+			break
+		}
+		var session journal.VMSession
+		if err := rows.Scan(&session.Scope.Tenant, &session.Scope.Deployment, &session.Scope.Subject,
+			&session.SessionID, &session.TurnSeq, &session.Epoch, &session.ExecutionID, &session.Status, &session.Harness,
+			&last.At); err != nil {
+			return journal.VMReconcilePage{}, err
+		}
+		last.TenantID, last.SessionID = session.Scope.Tenant, session.SessionID
+		result.Sessions = append(result.Sessions, session)
+	}
+	return result, rows.Err()
+}
+
+func vmReconcileFilter(status string) (timestamp, ready string, err error) {
+	switch status {
+	case SessionQueued:
+		return "queued_at", "status='QUEUED' AND queued_at<=statement_timestamp()-interval '2 seconds'", nil
+	case SessionActive:
+		return "lease_expires_at", "status='ACTIVE' AND turn_input_seq IS NOT NULL AND lease_expires_at<=statement_timestamp()", nil
+	default:
+		return "", "", contracts.NewError(contracts.ErrInvalid, "invalid VM reconcile status")
+	}
 }

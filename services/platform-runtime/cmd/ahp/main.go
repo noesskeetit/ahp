@@ -656,7 +656,8 @@ func (s *server) serveAll(ctx context.Context) error {
 	stateHandler = s.withDeletionCascade(stateHandler, st, verifier, controlConfig)
 	mux.Handle("/v1/state/", stateHandler)
 	mux.Handle("/v1/state-admin/", stateHandler)
-	stopCompactState, err := s.mountCompactState(ctx, mux, verifier, idStore.Authorize)
+	stopCompactState, err := s.mountCompactState(ctx, mux, verifier, idStore.Authorize,
+		strings.Split(os.Getenv("AHP_STATE_COORDINATOR_WORKLOAD_IDS"), ",")...)
 	if err != nil {
 		return err
 	}

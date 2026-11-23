@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ahp-platform/ahp/internal/identity"
 	"github.com/ahp-platform/ahp/internal/statejournal"
 	"github.com/ahp-platform/ahp/pkg/auth"
 	"github.com/ahp-platform/ahp/pkg/contracts"
@@ -160,6 +161,25 @@ func grantAuthorizer(ctx context.Context, path string) (transport.Authorize, err
 	}, nil
 }
 
+func stateAuthorizer(ctx context.Context, env func(string) string) (transport.Authorize, *pgxpool.Pool, error) {
+	dsn := env("AHP_STATE_IDENTITY_DSN")
+	if dsn == "" {
+		authorize, err := grantAuthorizer(ctx, env("AHP_STATE_GRANTS_FILE"))
+		return authorize, nil, err
+	}
+	startup, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(startup, dsn)
+	if err != nil {
+		return nil, nil, errors.New("could not configure the Identity PostgreSQL pool")
+	}
+	if err := pool.Ping(startup); err != nil {
+		pool.Close()
+		return nil, nil, errors.New("could not connect to Identity PostgreSQL")
+	}
+	return identity.New(pool).Authorize, pool, nil
+}
+
 func run(ctx context.Context, env func(string) string) error {
 	for _, key := range []string{
 		"AHP_STATE_DSN", "AHP_STATE_TLS_CERT", "AHP_STATE_TLS_KEY", "AHP_STATE_CLIENT_CA",
@@ -181,9 +201,12 @@ func run(ctx context.Context, env func(string) string) error {
 	}
 	policyCtx, stopPolicy := context.WithCancel(ctx)
 	defer stopPolicy()
-	authorize, err := grantAuthorizer(policyCtx, env("AHP_STATE_GRANTS_FILE"))
+	authorize, identityPool, err := stateAuthorizer(policyCtx, env)
 	if err != nil {
 		return err
+	}
+	if identityPool != nil {
+		defer identityPool.Close()
 	}
 	retention, err := durationSetting(env, "AHP_STATE_RETENTION", 30*24*time.Hour, time.Second)
 	if err != nil {
@@ -226,7 +249,7 @@ func run(ctx context.Context, env func(string) string) error {
 	verifier := auth.NewVerifier(env("AHP_STATE_TOKEN_ISSUER"), map[string]ed25519.PublicKey{
 		env("AHP_STATE_TOKEN_KID"): publicKey,
 	})
-	handler, err := stateHandler(store, verifier, authorize, env)
+	handler, err := stateHandler(store, verifier, authorize, identityPool != nil, env)
 	if err != nil {
 		return err
 	}
@@ -234,7 +257,7 @@ func run(ctx context.Context, env func(string) string) error {
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
 		defer cancel()
-		if pool.Ping(ctx) != nil {
+		if pool.Ping(ctx) != nil || (identityPool != nil && identityPool.Ping(ctx) != nil) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -295,10 +318,14 @@ func run(ctx context.Context, env func(string) string) error {
 	}
 }
 
-func stateHandler(store *statejournal.Store, verifier *auth.Verifier, authorize transport.Authorize, env func(string) string) (http.Handler, error) {
+func stateHandler(store *statejournal.Store, verifier *auth.Verifier, authorize transport.Authorize, liveIdentity bool, env func(string) string) (http.Handler, error) {
+	var coordinatorWorkloads []string
+	if liveIdentity {
+		coordinatorWorkloads = strings.Split(env("AHP_STATE_COORDINATOR_WORKLOAD_IDS"), ",")
+	}
 	file := env("AHP_STATE_TOOL_LEASE_KEY")
 	if file == "" {
-		return statejournal.NewHTTP(store, verifier, authorize)
+		return statejournal.NewHTTPWithCoordinator(store, verifier, authorize, nil, coordinatorWorkloads)
 	}
 	raw, err := readPEM(file, "PRIVATE KEY")
 	if err != nil {
@@ -313,7 +340,7 @@ func stateHandler(store *statejournal.Store, verifier *auth.Verifier, authorize 
 	if err != nil {
 		return nil, err
 	}
-	return statejournal.NewHTTPWithToolLeases(store, verifier, authorize, signer)
+	return statejournal.NewHTTPWithCoordinator(store, verifier, authorize, signer, coordinatorWorkloads)
 }
 
 func stateTLS(env func(string) string) (*tls.Config, error) {

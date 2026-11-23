@@ -67,21 +67,21 @@ func TestCoordinatorDispatchesOverMTLSAndLiveGrant(t *testing.T) {
 	good := dispatcherFor(coordinator, coordinatorCert)
 	foreign := dispatcherFor(other, otherCert)
 	exec := runcoord.Execution{Scope: target.Scope, SessionID: target.SessionID, Harness: target.Harness,
-		TurnSeq: target.LaunchTurnSeq, Generation: target.Generation, ExecutionID: target.ID}
+		LaunchTurnSeq: target.LaunchTurnSeq, Generation: target.Generation, ExecutionID: target.ID}
 	if err := foreign.EnsureRunning(ctx, exec); err == nil || !strings.Contains(err.Error(), "HTTP 403") {
 		t.Fatalf("foreign workload accepted: %v", err)
 	}
 	if err := good.EnsureRunning(ctx, exec); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := proc.Alive(ctx, Guest{target, 1}); !ok {
+	if ok, _ := proc.Alive(ctx, Guest{Execution: target, Attempt: 1}); !ok {
 		t.Fatal("server did not start the physical process")
 	}
-	exec.TurnSeq++
+	exec.LaunchTurnSeq++
 	if err := good.Fence(ctx, exec); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := proc.Alive(ctx, Guest{target, 1}); ok {
+	if ok, _ := proc.Alive(ctx, Guest{Execution: target, Attempt: 1}); ok {
 		t.Fatal("runtime acknowledged fence before process exited")
 	}
 	if err := grants.CancelSubtree(ctx, coordinator, "dispatch"); err != nil {

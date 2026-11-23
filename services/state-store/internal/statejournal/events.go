@@ -422,6 +422,10 @@ func (s *Store) getEvents(ctx context.Context, scope contracts.Scope, session st
 }
 
 func (s *Store) filteredEvents(ctx context.Context, scope contracts.Scope, session string, after int64, limit int, stateNamespace string, filters EventFilters) (EventPage, error) {
+	return s.readEvents(ctx, scope, session, after, limit, stateNamespace, filters, false)
+}
+
+func (s *Store) readEvents(ctx context.Context, scope contracts.Scope, session string, after int64, limit int, stateNamespace string, filters EventFilters, vmManagedOnly bool) (EventPage, error) {
 	var page EventPage
 	if err := scope.Validate(); err != nil {
 		return page, err
@@ -439,7 +443,8 @@ func (s *Store) filteredEvents(ctx context.Context, scope contracts.Scope, sessi
 	err = tx.QueryRow(ctx, `
 		SELECT head_seq, leaf_entry_id, append_parent_id, lease_epoch FROM ahp_journal.sessions
 		WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4
-		  AND status <> 'DELETED'`, scope.Tenant, session, scope.Deployment, scope.Subject).
+		  AND status <> 'DELETED' AND (NOT $5::boolean OR execution_mode='vm_managed')`,
+		scope.Tenant, session, scope.Deployment, scope.Subject, vmManagedOnly).
 		Scan(&page.HeadSeq, &page.Leaf, &page.AppendParent, &page.Epoch)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return page, contracts.NewError(contracts.ErrNotFound, "session not found")

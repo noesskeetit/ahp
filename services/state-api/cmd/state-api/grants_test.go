@@ -4,11 +4,17 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/ahp-platform/ahp/internal/statejournal"
 	"github.com/ahp-platform/ahp/pkg/auth"
 	"github.com/ahp-platform/ahp/pkg/contracts"
 )
@@ -85,5 +91,63 @@ func TestGrantFileReloadDeniesRevokedScope(t *testing.T) {
 	}
 	if err := authorize(ctx, claims, "state"); contracts.Code(err) != contracts.ErrForbidden {
 		t.Fatalf("revoked grant remains usable: %v", err)
+	}
+}
+
+func TestStateCoordinatorDeniesOfflineGrantPolicy(t *testing.T) {
+	scope := contracts.Scope{Tenant: "tenant", Deployment: "coord", Subject: "service"}
+	workload := auth.WorkloadID(scope)
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := auth.NewSigner("state-test", "grant-test", priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := auth.NewVerifier("state-test", map[string]ed25519.PublicKey{"grant-test": pub})
+	const grantID = "coordinator"
+	token, err := signer.Sign(auth.Claims{
+		Kind: auth.KindTask, Audience: "ahp", Tenant: scope.Tenant, Deployment: scope.Deployment, Subject: scope.Subject,
+		Task: "coord", Root: "coord", Context: "state-test", Grant: grantID, Capabilities: []string{"state", "state.coordinate"},
+	}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri, err := url.Parse(workload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "grants.json")
+	if err := os.WriteFile(path, []byte(`[{"tenant_id":"tenant","deployment_id":"coord","subject_id":"service","grant_id":"coordinator","capabilities":["state","state.coordinate"]}]`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, grantFile := range []string{"", path} {
+		env := map[string]string{"AHP_STATE_GRANTS_FILE": grantFile, "AHP_STATE_COORDINATOR_WORKLOAD_IDS": workload}
+		lookup := func(key string) string { return env[key] }
+		authorize, identityPool, err := stateAuthorizer(t.Context(), lookup)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler, err := stateHandler(statejournal.New(nil), verifier, authorize, identityPool != nil, lookup)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct {
+			path string
+			want int
+		}{
+			{"/internal/v1/state/vm-reconcile?status=invalid", http.StatusBadRequest},
+			{"/internal/v1/state/coordinator/vm-reconcile?status=invalid", http.StatusForbidden},
+		} {
+			r := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			r.Header.Set("Authorization", "Bearer "+token)
+			r.TLS = &tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{{URIs: []*url.URL{uri}}}}}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Errorf("offline route %s returned %d, want %d", tc.path, w.Code, tc.want)
+			}
+		}
 	}
 }

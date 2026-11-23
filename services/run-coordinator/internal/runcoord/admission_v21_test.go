@@ -4,13 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/ahp-platform/ahp/pkg/contracts"
 	"github.com/ahp-platform/ahp/pkg/contracts/journal"
-	"github.com/ahp-platform/ahp/pkg/transport"
 )
 
 type coldAdmissionState struct {
@@ -43,6 +40,8 @@ func (p *startupProbe) Fence(_ context.Context, _ Execution) error {
 
 func TestSendColdStartAndDurableFallback(t *testing.T) {
 	scope := contracts.Scope{Tenant: "tenant", Deployment: "agent", Subject: "user"}
+	signer, verifier := coordinatorAuth(t)
+	token := signedCaller(t, signer, taskCaller(scope, "run.coordinate"))
 	for _, tc := range []struct {
 		name         string
 		replay, fail bool
@@ -53,17 +52,16 @@ func TestSendColdStartAndDurableFallback(t *testing.T) {
 		{"replayed old admission", true, false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodPost, "/v1/agents/agent/sessions/s:send", strings.NewReader(`{"harness_type":"go","format_version":1,"key":"input","input":{"inline":"e30="}}`))
-			r.Header.Set("Content-Type", "application/json")
-			r = r.WithContext(transport.WithPrincipal(r.Context(), transport.Principal{Scope: scope}))
-			w := httptest.NewRecorder()
 			dispatcher := &startupProbe{failStart: tc.fail}
-			(&Coordinator{Scope: scope, State: coldAdmissionState{replayed: tc.replay}, Dispatcher: dispatcher}).Handler().ServeHTTP(w, r)
+			c := Coordinator{Dispatcher: dispatcher, StateFor: func(contracts.Scope) State { return coldAdmissionState{replayed: tc.replay} },
+				AccessPolicy: AccessPolicy{Verifier: verifier, AuthorizeAgent: testAllowAgent}}
+			w := coordinatorRequest(t.Context(), c.Handler(), http.MethodPost, "/v1/agents/agent/sessions/s:send",
+				`{"harness_type":"go","format_version":1,"key":"input","input":{"inline":"e30="}}`, token, scope)
 			if w.Code != http.StatusAccepted || len(dispatcher.starts) != tc.starts {
 				t.Fatalf("HTTP %d, starts %d, want %d", w.Code, len(dispatcher.starts), tc.starts)
 			}
 			if tc.starts != 0 {
-				want := journal.DeterministicExecutionID(scope, "s", 3, 2)
+				want := journal.DeterministicExecutionID(scope, journal.ScopedSessionID(scope, "s"), 3, 2)
 				if dispatcher.starts[0].ExecutionID != want {
 					t.Fatalf("execution ID %q want %q", dispatcher.starts[0].ExecutionID, want)
 				}
@@ -96,7 +94,7 @@ func TestReconcileDrainsBothQueuesPastFailedFences(t *testing.T) {
 		t.Fatal(err)
 	}
 	probe := &startupProbe{}
-	c := Coordinator{Scope: db.scope, State: db, Dispatcher: probe}
+	c := scopedTestCoordinator(db.scope, db, probe, nil)
 	if err := c.Reconcile(ctx); err == nil {
 		t.Fatal("expected reported Runtime failures")
 	}

@@ -30,6 +30,10 @@ type TurnLease = journal.TurnLease
 type TurnStatus = journal.TurnStatus
 
 func (s *Store) GetTurnStatus(ctx context.Context, scope contracts.Scope, session string) (TurnStatus, error) {
+	return s.getTurnStatus(ctx, scope, session, false)
+}
+
+func (s *Store) getTurnStatus(ctx context.Context, scope contracts.Scope, session string, vmManagedOnly bool) (TurnStatus, error) {
 	var status TurnStatus
 	if err := scope.Validate(); err != nil {
 		return status, err
@@ -39,8 +43,9 @@ func (s *Store) GetTurnStatus(ctx context.Context, scope contracts.Scope, sessio
 	}
 	err := s.pool.QueryRow(ctx, `
 		SELECT status,lease_epoch,head_seq,turn_input_seq FROM ahp_journal.sessions
-		WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4 AND status<>'DELETED'`,
-		scope.Tenant, session, scope.Deployment, scope.Subject).Scan(&status.Status, &status.Epoch, &status.HeadSeq, &status.InputSeq)
+		WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4 AND status<>'DELETED'
+		  AND (NOT $5::boolean OR execution_mode='vm_managed')`,
+		scope.Tenant, session, scope.Deployment, scope.Subject, vmManagedOnly).Scan(&status.Status, &status.Epoch, &status.HeadSeq, &status.InputSeq)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = contracts.NewError(contracts.ErrNotFound, "session not found")
 	}

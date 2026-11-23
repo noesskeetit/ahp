@@ -5,6 +5,7 @@ package compute
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,12 +23,40 @@ import (
 type ManagedFirecracker struct {
 	Runtime *FirecrackerRuntime
 	Root    string
-	guests  sync.Map // attempt ID -> Sandbox, populated only for children of this process
+	guests  sync.Map // attempt ID -> managedVM, populated only for children of this process
+}
+
+type managedVM struct {
+	sandbox   *fcSandbox
+	afterExit chan struct{}
 }
 
 var managedVMID = regexp.MustCompile(`^exec-[a-f0-9]{24}-[1-9][0-9]*$`)
 
+func (m *ManagedFirecracker) InjectorSocket(id string, port uint32) (string, error) {
+	if m.Runtime == nil || !managedVMID.MatchString(id) || port == 0 || port >= 1<<30 {
+		return "", invalid("invalid managed VM injector address")
+	}
+	return filepath.Join(m.Runtime.cfg.DataDir, id, fmt.Sprintf("vsock.sock_%d", port)), nil
+}
+
 func (m *ManagedFirecracker) Start(ctx context.Context, id string) error {
+	return m.start(ctx, id, "", nil)
+}
+
+func (m *ManagedFirecracker) StartWithInjector(ctx context.Context, id string, port uint32, socket string, onExit func()) error {
+	expected, err := m.InjectorSocket(id, port)
+	if err != nil {
+		return err
+	}
+	st, err := os.Lstat(socket)
+	if socket != expected || err != nil || st.Mode().Type() != os.ModeSocket {
+		return Unavailable("firecracker", "managed attempt has no verified host injector socket")
+	}
+	return m.start(ctx, id, filepath.Join(filepath.Dir(socket), "vsock.sock"), onExit)
+}
+
+func (m *ManagedFirecracker) start(ctx context.Context, id string, vsockPath string, onExit func()) error {
 	path, err := m.group(id)
 	if err != nil {
 		return err
@@ -44,11 +73,21 @@ func (m *ManagedFirecracker) Start(ctx context.Context, id string) error {
 		return Unavailable("firecracker", "cannot guarantee stop for this cgroup: "+err.Error())
 	}
 	guest, err := m.Runtime.acquire(ctx, AcquireSpec{Class: ClassX}, id,
-		&syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(group.Fd())})
+		&syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(group.Fd())}, vsockPath)
 	if err != nil {
 		return err
 	}
-	m.guests.Store(id, guest)
+	vm := &managedVM{sandbox: guest.(*fcSandbox), afterExit: make(chan struct{})}
+	m.guests.Store(id, vm)
+	if onExit == nil {
+		close(vm.afterExit)
+	} else {
+		go func() {
+			<-vm.sandbox.done
+			onExit()
+			close(vm.afterExit)
+		}()
+	}
 	return nil
 }
 
@@ -89,11 +128,17 @@ func (m *ManagedFirecracker) StopAndWait(ctx context.Context, id string) error {
 		return Unavailable("firecracker", "cannot remove empty execution cgroup: "+err.Error())
 	}
 	if guest, ok := m.guests.Load(id); ok {
-		if err := m.Runtime.ReleaseSandbox(ctx, guest.(Sandbox)); err != nil {
+		vm := guest.(*managedVM)
+		if err := m.Runtime.ReleaseSandbox(ctx, vm.sandbox); err != nil {
 			return err
 		}
-		m.guests.Delete(id)
-		return nil
+		select {
+		case <-vm.afterExit:
+			m.guests.Delete(id)
+			return nil
+		case <-ctx.Done():
+			return Unavailable("firecracker", "guest stopped but injector closure is unconfirmed")
+		}
 	}
 	if err := os.RemoveAll(filepath.Join(m.Runtime.cfg.DataDir, id)); err != nil {
 		return Unavailable("firecracker", "cannot clean execution files: "+err.Error())

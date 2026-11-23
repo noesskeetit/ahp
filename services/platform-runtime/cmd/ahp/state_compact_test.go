@@ -35,6 +35,8 @@ func TestCompactStateRoutesShareOriginWithLegacyState(t *testing.T) {
 		{"/v1/state/sessions/a/checkpoints", "compact"},
 		{"/v1/state/sessions/a/vm:claim", "compact"},
 		{"/internal/v1/state/vm-reconcile", "compact"},
+		{"/internal/v1/state/coordinator/vm-reconcile", "compact"},
+		{"/internal/v1/state/coordinator/scopes/a/b/c/sessions:enqueue", "compact"},
 		{"/v1/state/kv", "compact"},
 		{"/v1/state/kv:mutate", "compact"},
 		{"/v1/state/aux:mutate", "compact"},

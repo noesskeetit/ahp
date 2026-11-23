@@ -176,10 +176,10 @@ func (s *fcSandbox) Node() string    { return s.node }
 // failure after the process starts the guest is torn down before returning, so
 // a half-booted VM never lingers.
 func (r *FirecrackerRuntime) Acquire(ctx context.Context, spec AcquireSpec) (Sandbox, error) {
-	return r.acquire(ctx, spec, "vm-"+contracts.NewID(), nil)
+	return r.acquire(ctx, spec, "vm-"+contracts.NewID(), nil, "")
 }
 
-func (r *FirecrackerRuntime) acquire(ctx context.Context, spec AcquireSpec, vmID string, processAttr *syscall.SysProcAttr) (_ Sandbox, acquireErr error) {
+func (r *FirecrackerRuntime) acquire(ctx context.Context, spec AcquireSpec, vmID string, processAttr *syscall.SysProcAttr, vsockPath string) (_ Sandbox, acquireErr error) {
 	if err := r.Probe(ctx); err != nil {
 		return nil, err
 	}
@@ -187,8 +187,17 @@ func (r *FirecrackerRuntime) acquire(ctx context.Context, spec AcquireSpec, vmID
 	if err := os.MkdirAll(r.cfg.DataDir, 0o750); err != nil {
 		return nil, Unavailable("firecracker", "cannot create data directory: "+err.Error())
 	}
-	if err := os.Mkdir(dir, 0o750); err != nil {
-		return nil, Unavailable("firecracker", "cannot create vm dir: "+err.Error())
+	if vsockPath == "" {
+		if err := os.Mkdir(dir, 0o750); err != nil {
+			return nil, Unavailable("firecracker", "cannot create vm dir: "+err.Error())
+		}
+	} else {
+		// The host injector reserves this directory before starting the VM.
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() || info.Mode().Perm()&0o077 != 0 ||
+			vsockPath != filepath.Join(dir, "vsock.sock") {
+			return nil, Unavailable("firecracker", "managed VM requires its reserved injector directory")
+		}
 	}
 	rootfs := filepath.Join(dir, "rootfs.ext4")
 	if err := copyCoW(r.cfg.RootFSImage, rootfs); err != nil {
@@ -237,6 +246,11 @@ func (r *FirecrackerRuntime) acquire(ctx context.Context, spec AcquireSpec, vmID
 	}
 	if r.cfg.TapName != "" && r.cfg.GuestMAC != "" {
 		if err := api.putNetwork(ctx, "eth0", r.cfg.TapName, r.cfg.GuestMAC); err != nil {
+			return nil, err
+		}
+	}
+	if vsockPath != "" {
+		if err := api.putVSock(ctx, vsockPath); err != nil {
 			return nil, err
 		}
 	}
@@ -473,6 +487,11 @@ func (c *fcClient) putDrive(ctx context.Context, id, path string, isRoot, readOn
 		"drive_id": id, "path_on_host": path, "is_root_device": isRoot,
 		"is_read_only": readOnly,
 	})
+}
+
+// Firecracker maps guest-to-host ports to <base>_<port> on the host.
+func (c *fcClient) putVSock(ctx context.Context, path string) error {
+	return c.call(ctx, http.MethodPut, "/vsock", map[string]any{"guest_cid": 3, "uds_path": path})
 }
 
 func (c *fcClient) putNetwork(ctx context.Context, ifaceID, hostDevName, guestMAC string) error {

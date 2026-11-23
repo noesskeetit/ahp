@@ -9,6 +9,7 @@ import (
 	"errors"
 	"github.com/ahp-platform/ahp/pkg/contracts"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -63,6 +64,22 @@ func New(cfg Config) (*Client, error) {
 	}
 	return &Client{strings.TrimRight(cfg.BaseURL, "/"), &h, cfg.TokenSource}, nil
 }
+
+// NewLocal connects to a host injector over the supplied local transport.
+// Network clients must use New, which always requires a token and HTTPS.
+func NewLocal(dial func(context.Context) (net.Conn, error)) *Client {
+	return &Client{base: "http://ahp-injector.local", http: &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return dial(ctx)
+			},
+			IdleConnTimeout: 30 * time.Second,
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Timeout:       10 * time.Minute,
+	}}
+}
+
 func Required(s string) error {
 	if strings.TrimSpace(s) == "" {
 		return contracts.NewError(contracts.ErrInvalid, "stable operation key or identifier is required")
@@ -77,15 +94,19 @@ func (c *Client) requestMethod(ctx context.Context, method, path string, input a
 	if ctx == nil {
 		return nil, contracts.NewError(contracts.ErrInvalid, "context is required")
 	}
-	token, e := c.token(ctx)
-	if e != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	var token string
+	if c.token != nil {
+		var err error
+		token, err = c.token(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, contracts.NewError(contracts.ErrForbidden, "token source failed")
 		}
-		return nil, contracts.NewError(contracts.ErrForbidden, "token source failed")
-	}
-	if strings.TrimSpace(token) == "" {
-		return nil, contracts.NewError(contracts.ErrForbidden, "current task token is required")
+		if strings.TrimSpace(token) == "" {
+			return nil, contracts.NewError(contracts.ErrForbidden, "current task token is required")
+		}
 	}
 	var body io.Reader
 	if input != nil || method == http.MethodPost {
@@ -99,7 +120,9 @@ func (c *Client) requestMethod(ctx context.Context, method, path string, input a
 	if e != nil {
 		return nil, contracts.NewError(contracts.ErrInvalid, "invalid request")
 	}
-	r.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
 	if body != nil {
 		r.Header.Set("Content-Type", "application/json")
 	}

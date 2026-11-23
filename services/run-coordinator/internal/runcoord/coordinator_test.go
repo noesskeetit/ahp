@@ -66,7 +66,7 @@ func TestQueuedCrashBeforeEnsureRunningAndBootFailureRecovery(t *testing.T) {
 	var calls []string
 	scope := contracts.Scope{Tenant: "tenant", Deployment: "agent", Subject: "user"}
 	state := recoveryState{pending: []journal.VMSession{{Scope: scope, SessionID: "s", TurnSeq: 2, Status: "QUEUED"}}}
-	service := Coordinator{Scope: scope, State: state, Dispatcher: dispatcherProbe{actions: &calls}}
+	service := scopedTestCoordinator(scope, state, dispatcherProbe{actions: &calls}, nil)
 	for range 2 {
 		if err := service.Reconcile(context.Background()); err != nil {
 			t.Fatal(err)
@@ -86,7 +86,7 @@ func TestWorkerRecoveryFencesPhysicalOwnerBeforeRequeue(t *testing.T) {
 	state := recoveryState{actions: &calls, pending: []journal.VMSession{{
 		Scope: scope, SessionID: "s", TurnSeq: 3, Epoch: 1, ExecutionID: owner, Status: "ACTIVE",
 	}}}
-	service := Coordinator{Scope: scope, State: state, Dispatcher: dispatcherProbe{actions: &calls, failFence: true}}
+	service := scopedTestCoordinator(scope, state, dispatcherProbe{actions: &calls, failFence: true}, nil)
 	if err := service.Reconcile(context.Background()); err == nil || len(calls) != 1 {
 		t.Fatalf("recovery proceeded while the old process was live: %v %v", calls, err)
 	}
@@ -117,11 +117,11 @@ func TestTurnScopedSSEWithInterleavedEventsAndIncompleteTail(t *testing.T) {
 		{"missing", []journal.Event{initial, reply, complete}, "INCOMPLETE_TAIL", "event: end"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			service := Coordinator{State: recoveryState{events: test.events}}
+			service := Coordinator{}
 			r := httptest.NewRequest(http.MethodGet, "/stream?turn_seq=1", nil)
 			r.Header.Set("Last-Event-ID", "1")
 			w := httptest.NewRecorder()
-			service.stream(w, r, "s")
+			service.stream(w, r, recoveryState{events: test.events}, SessionSignal{SessionID: "s"})
 			body := w.Body.String()
 			if !strings.Contains(body, test.want) || strings.Contains(body, test.exclude) {
 				t.Fatal(body)
@@ -131,4 +131,25 @@ func TestTurnScopedSSEWithInterleavedEventsAndIncompleteTail(t *testing.T) {
 			}
 		})
 	}
+}
+
+type scopedTestState interface {
+	State
+	ListRecoverableVMPage(context.Context, string, *journal.VMReconcileCursor) (journal.VMReconcilePage, error)
+}
+
+type scopedTestGlobalState struct{ scopedTestState }
+
+func (s scopedTestGlobalState) ListGlobalRecoverableVMPage(ctx context.Context, status string, cursor *journal.VMReconcileCursor) (journal.VMReconcilePage, error) {
+	return s.ListRecoverableVMPage(ctx, status, cursor)
+}
+
+func scopedTestCoordinator(scope contracts.Scope, state scopedTestState, dispatcher VMDispatcher, signals SignalBus) *Coordinator {
+	return &Coordinator{GlobalState: scopedTestGlobalState{state}, Dispatcher: dispatcher, Signals: signals,
+		StateFor: func(requested contracts.Scope) State {
+			if requested == scope {
+				return state
+			}
+			return nil
+		}}
 }

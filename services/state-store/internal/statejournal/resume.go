@@ -12,6 +12,10 @@ import (
 type ResumeState = journal.ResumeState
 
 func (s *Store) InspectSession(ctx context.Context, scope contracts.Scope, session string) (ResumeState, error) {
+	return s.inspectSession(ctx, scope, session, false)
+}
+
+func (s *Store) inspectSession(ctx context.Context, scope contracts.Scope, session string, vmManagedOnly bool) (ResumeState, error) {
 	var state ResumeState
 	if err := scope.Validate(); err != nil {
 		return state, err
@@ -28,8 +32,9 @@ func (s *Store) InspectSession(ctx context.Context, scope contracts.Scope, sessi
 	err = tx.QueryRow(ctx, `
 		SELECT harness_type,format_version,status,head_seq,head_checkpoint_id,leaf_entry_id,append_parent_id,parent_session_id
 		FROM ahp_journal.sessions
-		WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4 AND status<>'DELETED'`,
-		scope.Tenant, session, scope.Deployment, scope.Subject).Scan(&state.Harness, &state.FormatVersion, &state.Status,
+		WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4 AND status<>'DELETED'
+		  AND (NOT $5::boolean OR execution_mode='vm_managed')`,
+		scope.Tenant, session, scope.Deployment, scope.Subject, vmManagedOnly).Scan(&state.Harness, &state.FormatVersion, &state.Status,
 		&state.HeadSeq, &state.HeadCheckpoint, &state.Leaf, &state.AppendParent, &state.ParentSessionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ResumeState{}, contracts.NewError(contracts.ErrNotFound, "session not found")

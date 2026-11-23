@@ -15,7 +15,7 @@ import (
 
 // NewHTTP mounts the journal operations implemented by the compact store.
 func NewHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authorize) (http.Handler, error) {
-	return newHTTP(store, verifier, authorize, nil, false)
+	return newHTTP(store, verifier, authorize, nil, false, nil)
 }
 
 // NewHTTPWithToolLeases issues proof of lease ownership for the fenced Gateway.
@@ -24,17 +24,23 @@ func NewHTTPWithToolLeases(store *Store, verifier *auth.Verifier, authorize tran
 	if signer == nil {
 		return nil, invalidHTTP("journal tool leases require a signing key")
 	}
-	return newHTTP(store, verifier, authorize, signer, false)
+	return newHTTP(store, verifier, authorize, signer, false, nil)
 }
 
 // NewHTTPWithDotsFIFO explicitly enables the additional task-scoped Dots
 // admission and claim routes. An optional signer issues fenced Tool Gateway
 // proof tied to the same verified task that owns the claimed run.
 func NewHTTPWithDotsFIFO(store *Store, verifier *auth.Verifier, authorize transport.Authorize, signer *auth.Signer) (http.Handler, error) {
-	return newHTTP(store, verifier, authorize, signer, true)
+	return newHTTP(store, verifier, authorize, signer, true, nil)
 }
 
-func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authorize, signer *auth.Signer, dotsFIFO bool) (http.Handler, error) {
+// NewHTTPWithCoordinator enables global VM coordination for the listed
+// workloads. authorize must evaluate current grants. signer is optional.
+func NewHTTPWithCoordinator(store *Store, verifier *auth.Verifier, authorize transport.Authorize, signer *auth.Signer, coordinatorWorkloads []string) (http.Handler, error) {
+	return newHTTP(store, verifier, authorize, signer, false, coordinatorWorkloads)
+}
+
+func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authorize, signer *auth.Signer, dotsFIFO bool, coordinatorWorkloads []string) (http.Handler, error) {
 	if store == nil || verifier == nil || authorize == nil {
 		return nil, invalidHTTP("journal handler requires storage, verification and authorization")
 	}
@@ -59,6 +65,7 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 		}{lease, control, proof}, nil
 	}
 	mux := http.NewServeMux()
+	mountCoordinatorRoutes(mux, store, authorize, coordinatorWorkloads)
 	if store.s3 != nil {
 		mux.HandleFunc("POST /v1/state/sessions/{session}/blobs:stage", jsonRouteLimit(6<<20, func(r *http.Request, caller transport.Principal, req stageBlobRequest) (any, error) {
 			return store.StageBlob(r.Context(), caller.Scope, r.PathValue("session"), authorizedLease(caller, req.Epoch), req.Data)
@@ -241,46 +248,7 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 		return store.AppendEvents(r.Context(), caller.Scope, r.PathValue("session"), authorizedLease(caller, req.Epoch), shared, req.AppendRequest)
 	}))
 	mux.HandleFunc("GET /v1/state/sessions/{session}/events", readRoute(func(r *http.Request, caller transport.Principal) (any, error) {
-		after, err := queryInt(r, "after_seq", 0)
-		if err != nil {
-			return nil, err
-		}
-		limit, err := queryInt(r, "limit", 100)
-		if err != nil || limit < 1 || limit > 1000 {
-			return nil, invalidHTTP("invalid limit")
-		}
-		query := r.URL.Query()
-		filters := EventFilters{
-			Search: query.Get("q"), BranchLeaf: query.Get("branch_leaf_id"),
-		}
-		if raw := query.Get("after_ts"); raw != "" {
-			stamp, err := time.Parse(time.RFC3339Nano, raw)
-			if err != nil {
-				return nil, invalidHTTP("invalid after_ts")
-			}
-			filters.AfterTime = &stamp
-		}
-		if raw := query.Get("active_only"); raw != "" {
-			active, err := strconv.ParseBool(raw)
-			if err != nil {
-				return nil, invalidHTTP("invalid active_only")
-			}
-			filters.ActiveOnly = active
-		}
-		if raw := query.Get("num_recent"); raw != "" {
-			recent, err := queryInt(r, "num_recent", 0)
-			if err != nil || recent < 1 || recent > 1000 {
-				return nil, invalidHTTP("invalid num_recent")
-			}
-			limit, filters.Recent = recent, true
-		}
-		namespace := query.Get("state_namespace")
-		if namespace != "" {
-			if err := authorize(r.Context(), caller.Claims, "state.shared"); err != nil {
-				return nil, err
-			}
-		}
-		return store.filteredEvents(r.Context(), caller.Scope, r.PathValue("session"), after, int(limit), namespace, filters)
+		return readSessionEvents(r, caller, store, authorize, caller.Scope, false)
 	}))
 	mux.HandleFunc("POST /v1/state/sessions/{session}/checkpoints", jsonRouteLimit(3<<20, func(r *http.Request, caller transport.Principal, req checkpointRequest) (any, error) {
 		return store.CommitCheckpoint(r.Context(), caller.Scope, r.PathValue("session"), authorizedLease(caller, req.Epoch), req.CheckpointCommit)
@@ -455,6 +423,49 @@ type intentRequest struct {
 type beginStandaloneRequest struct {
 	Epoch int64 `json:"lease_epoch"`
 	StandaloneToolRequest
+}
+
+func readSessionEvents(r *http.Request, caller transport.Principal, store *Store, authorize transport.Authorize, scope contracts.Scope, vmManagedOnly bool) (any, error) {
+	after, err := queryInt(r, "after_seq", 0)
+	if err != nil {
+		return nil, err
+	}
+	limit, err := queryInt(r, "limit", 100)
+	if err != nil || limit < 1 || limit > 1000 {
+		return nil, invalidHTTP("invalid limit")
+	}
+	query := r.URL.Query()
+	filters := EventFilters{
+		Search: query.Get("q"), BranchLeaf: query.Get("branch_leaf_id"),
+	}
+	if raw := query.Get("after_ts"); raw != "" {
+		stamp, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			return nil, invalidHTTP("invalid after_ts")
+		}
+		filters.AfterTime = &stamp
+	}
+	if raw := query.Get("active_only"); raw != "" {
+		active, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, invalidHTTP("invalid active_only")
+		}
+		filters.ActiveOnly = active
+	}
+	if raw := query.Get("num_recent"); raw != "" {
+		recent, err := queryInt(r, "num_recent", 0)
+		if err != nil || recent < 1 || recent > 1000 {
+			return nil, invalidHTTP("invalid num_recent")
+		}
+		limit, filters.Recent = recent, true
+	}
+	namespace := query.Get("state_namespace")
+	if namespace != "" {
+		if err := authorize(r.Context(), caller.Claims, "state.shared"); err != nil {
+			return nil, err
+		}
+	}
+	return store.readEvents(r.Context(), scope, r.PathValue("session"), after, int(limit), namespace, filters, vmManagedOnly)
 }
 
 func authorizedLease(caller transport.Principal, epoch int64) Lease {

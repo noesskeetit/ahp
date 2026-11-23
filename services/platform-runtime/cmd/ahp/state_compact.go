@@ -37,14 +37,14 @@ func mountCompactStateRoutes(mux *http.ServeMux, handler http.Handler) {
 		"/v1/state/sessions", "/v1/state/sessions/", "/v1/state/sessions:acquire",
 		"/v1/state/sessions:enqueue", "/v1/state/sessions:claim-turn", "/v1/state/kv",
 		"/v1/state/kv:mutate", "/v1/state/aux:mutate", "/v1/state/intents:mutate",
-		"/internal/v1/state/vm-reconcile",
+		"/internal/v1/state/vm-reconcile", "/internal/v1/state/coordinator", "/internal/v1/state/coordinator/",
 	} {
 		mux.Handle(path, handler)
 	}
 }
 
 func (s *server) mountCompactState(ctx context.Context, mux *http.ServeMux, verifier *auth.Verifier,
-	authorize transport.Authorize) (func(), error) {
+	authorize transport.Authorize, coordinatorWorkloads ...string) (func(), error) {
 	if envOr("AHP_ENABLE_COMPACT_STATE", "") != "1" {
 		return func() {}, nil
 	}
@@ -97,12 +97,7 @@ func (s *server) mountCompactState(ctx context.Context, mux *http.ServeMux, veri
 		}
 	}
 
-	var handler http.Handler
-	if signer != nil {
-		handler, err = statejournal.NewHTTPWithToolLeases(store, verifier, authorize, signer)
-	} else {
-		handler, err = statejournal.NewHTTP(store, verifier, authorize)
-	}
+	handler, err := statejournal.NewHTTPWithCoordinator(store, verifier, authorize, signer, coordinatorWorkloads)
 	if err != nil {
 		return nil, err
 	}

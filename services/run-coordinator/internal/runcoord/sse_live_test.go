@@ -126,15 +126,21 @@ func TestSSEConcurrentReadersLiveTurn(t *testing.T) {
 	background.Go(func() { bus.Run(ctx) })
 	t.Cleanup(background.Wait)
 
-	const session = "live"
+	const conversation = "live"
+	session := journal.ScopedSessionID(db.scope, conversation)
 	vm := &fakeVM{}
-	handler := (&Coordinator{Scope: db.scope, State: db, Dispatcher: vm, Signals: bus}).Handler()
+	c := scopedTestCoordinator(db.scope, db, vm, bus)
+	signer, verifier := coordinatorAuth(t)
+	c.AccessPolicy = AccessPolicy{Verifier: verifier, AuthorizeAgent: testAllowAgent}
+	token := signedCaller(t, signer, taskCaller(db.scope, "run.coordinate"))
+	handler := c.Handler()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r = r.WithContext(transport.WithPrincipal(r.Context(), transport.Principal{Scope: db.scope}))
+		setVerifiedPeer(r, db.scope)
+		r.Header.Set("Authorization", "Bearer "+token)
 		handler.ServeHTTP(w, r)
 	}))
 	t.Cleanup(server.Close)
-	path := "/v1/agents/" + db.scope.Deployment + "/sessions/" + session
+	path := "/v1/agents/" + db.scope.Deployment + "/sessions/" + conversation
 	request := httptest.NewRequest(http.MethodPost, path+":send", strings.NewReader(`{
 		"harness_type":"go","format_version":1,"key":"initial","input":{"inline":"e30="}
 	}`))

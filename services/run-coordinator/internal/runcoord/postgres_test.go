@@ -73,6 +73,13 @@ func openPG(t *testing.T) (context.Context, *pgxpool.Pool, databaseState) {
 	if err := db.store.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := pool.Exec(cleanupCtx, "DELETE FROM ahp_journal.sessions WHERE tenant_id=$1", db.scope.Tenant); err != nil {
+			t.Errorf("delete fixture sessions: %v", err)
+		}
+	})
 	return ctx, pool, db
 }
 
@@ -118,8 +125,8 @@ func TestQueuedAndActiveVMReconcilePostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	vm := &fakeVM{}
-	first := &Coordinator{Scope: db.scope, State: db, Dispatcher: vm}
-	second := &Coordinator{Scope: db.scope, State: db, Dispatcher: vm}
+	first := scopedTestCoordinator(db.scope, db, vm, nil)
+	second := scopedTestCoordinator(db.scope, db, vm, nil)
 	var group sync.WaitGroup
 	for _, c := range []*Coordinator{first, second} {
 		group.Go(func() {
@@ -193,9 +200,9 @@ func TestCoordinatorZeroMemoryGrowth(t *testing.T) {
 			t.Errorf("orphaned SSE subscribers: %d", len(bus.subscribers))
 		}
 	}()
-	service := &Coordinator{Scope: db.scope, State: db, Signals: bus}
+	service := scopedTestCoordinator(db.scope, db, nil, bus)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		service.stream(w, r, strings.TrimPrefix(r.URL.Path, "/"))
+		service.stream(w, r, db, SessionSignal{Scope: db.scope, SessionID: strings.TrimPrefix(r.URL.Path, "/")})
 	}))
 	defer server.Close()
 	payload := journal.Payload{Inline: []byte(fmt.Sprintf(`{"message":"%s"}`, strings.Repeat("x", 100<<10)))}

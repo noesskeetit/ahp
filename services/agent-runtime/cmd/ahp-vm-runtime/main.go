@@ -24,6 +24,7 @@ import (
 	"github.com/ahp-platform/ahp/pkg/auth"
 	"github.com/ahp-platform/ahp/pkg/contracts"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sys/unix"
 )
 
 func main() {
@@ -37,11 +38,13 @@ func main() {
 
 func run(ctx context.Context) error {
 	for _, key := range []string{
-		"AHP_VM_RUNTIME_HOST_ID", "AHP_VM_RUNTIME_SLOT_DIR", "AHP_VM_RUNTIME_CGROUP_ROOT",
+		"AHP_VM_RUNTIME_HOST_ID", "AHP_VM_RUNTIME_SLOT_DIR",
 		"AHP_VM_RUNTIME_DSN", "AHP_VM_RUNTIME_IDENTITY_DSN",
 		"AHP_VM_RUNTIME_TLS_CERT", "AHP_VM_RUNTIME_TLS_KEY", "AHP_VM_RUNTIME_CA",
 		"AHP_VM_RUNTIME_JWT_ISSUER", "AHP_VM_RUNTIME_JWT_KID", "AHP_VM_RUNTIME_JWT_PUBLIC_KEY",
 		"AHP_VM_RUNTIME_COORDINATOR_WORKLOAD_IDS",
+		"AHP_VM_RUNTIME_JWT_PRIVATE_KEY", "AHP_VM_RUNTIME_STATE_URL",
+		"AHP_VM_RUNTIME_STATE_CA", "AHP_VM_RUNTIME_WORKLOAD_CERT_DIR",
 	} {
 		if os.Getenv(key) == "" {
 			return fmt.Errorf("%s is required", key)
@@ -58,11 +61,15 @@ func run(ctx context.Context) error {
 	if err != nil || !stateInfo.IsDir() || stateInfo.Mode().Perm()&0o077 != 0 {
 		return errors.New("host slot directory must be private to vm runtime")
 	}
-	driver, err := vmruntime.FirecrackerDriver(os.Getenv("AHP_VM_RUNTIME_CGROUP_ROOT"))
+	lock, err := lockHostSlots(stateDir)
 	if err != nil {
 		return err
 	}
-	host := vmruntime.Host{ID: os.Getenv("AHP_VM_RUNTIME_HOST_ID"), Dir: stateDir, Driver: driver}
+	defer lock.Close()
+	driver, err := runtimeDriver(stateDir)
+	if err != nil {
+		return err
+	}
 
 	tlsConfig, verifier, err := credentials()
 	if err != nil {
@@ -88,6 +95,11 @@ func run(ctx context.Context) error {
 	if err := grants.Migrate(ctx); err != nil {
 		return err
 	}
+	injector, err := runtimeInjector(grants)
+	if err != nil {
+		return err
+	}
+	host := vmruntime.Host{ID: os.Getenv("AHP_VM_RUNTIME_HOST_ID"), Dir: stateDir, Driver: driver, Injector: injector}
 	manager := vmruntime.Manager{Pool: pool, Grants: grants,
 		PlaceHost: func(vmruntime.Execution) string { return host.ID },
 		Host: func(id string) (vmruntime.ExecutionHost, error) {
@@ -118,6 +130,31 @@ func run(ctx context.Context) error {
 		defer cancel()
 		defer server.Close()
 		return server.Shutdown(shutdown)
+	}
+}
+
+// Attempt listeners belong to one local daemon. Across a restart the slot
+// records remain, but a simultaneous second daemon cannot own their sockets.
+func lockHostSlots(dir string) (*os.File, error) {
+	lock, err := os.OpenFile(filepath.Join(dir, ".runtime.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open runtime host slot lock: %w", err)
+	}
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = lock.Close()
+		return nil, fmt.Errorf("runtime host slots are already owned or unavailable: %w", err)
+	}
+	return lock, nil
+}
+
+func runtimeDriver(dir string) (vmruntime.Driver, error) {
+	switch os.Getenv("AHP_VM_RUNTIME_DRIVER") {
+	case "", "firecracker":
+		return vmruntime.FirecrackerDriver(os.Getenv("AHP_VM_RUNTIME_CGROUP_ROOT"))
+	case "process":
+		return vmruntime.NewProcessDriver(filepath.Join(dir, "trusted-workers"), os.Getenv("AHP_VM_RUNTIME_WORKER_BINARY"))
+	default:
+		return nil, errors.New("AHP_VM_RUNTIME_DRIVER must be firecracker or process")
 	}
 }
 
