@@ -95,12 +95,12 @@ func run(ctx context.Context) error {
 	if err := grants.Migrate(ctx); err != nil {
 		return err
 	}
-	injector, err := runtimeInjector(grants)
+	injector, toolsAllowed, err := runtimeInjector(grants)
 	if err != nil {
 		return err
 	}
 	host := vmruntime.Host{ID: os.Getenv("AHP_VM_RUNTIME_HOST_ID"), Dir: stateDir, Driver: driver, Injector: injector}
-	manager := vmruntime.Manager{Pool: pool, Grants: grants,
+	manager := vmruntime.Manager{Pool: pool, Grants: grants, ToolsAllowed: toolsAllowed,
 		PlaceHost: func(vmruntime.Execution) string { return host.ID },
 		Host: func(id string) (vmruntime.ExecutionHost, error) {
 			if id != host.ID {

@@ -58,6 +58,7 @@ export interface HeartbeatOptions {
   intervalMs?: number;
   controller?: AbortController;
   onControl?: (control: TurnControlDelta) => void | Promise<void>;
+  vmLease?: VMLease;
 }
 export interface Heartbeat {
   readonly fenced: boolean;
@@ -105,8 +106,15 @@ export interface TurnControlDelta {
   pending_steer?: JournalEvent[];
   cancel_requested?: boolean;
   next_turn?: TurnLease;
+  tool_lease_proof?: string;
 }
 export interface HeartbeatReceipt extends Lease { control?: TurnControlDelta }
+export class VMLease {
+  constructor(turn: TurnLease);
+  readonly current: TurnLease | undefined;
+  applyHeartbeat(renewed?: HeartbeatReceipt): TurnControlDelta | undefined;
+  applyFinish(finishedTurnSeq: number, receipt: AppendReceipt): boolean;
+}
 export interface TurnStatus { status: SessionStatus; lease_epoch: number; head_seq: number; input_seq?: number }
 export interface SessionQuery { harness?: string; cursor?: string; limit?: number }
 export interface SessionPage { session_ids: string[]; next_cursor?: string }
@@ -175,11 +183,12 @@ export interface PreparedIntent {
 export interface IntentTransition {
   turn_seq?: number;
   call_id: string;
-  status: 'DISPATCHED' | 'COMPLETED' | 'OUTCOME_UNKNOWN';
+  status: 'DISPATCHED' | 'AWAITING_APPROVAL' | 'AWAITING_AUTH' | 'COMPLETED' | 'REFUSED' | 'OUTCOME_UNKNOWN';
   gateway_operation_id: string;
   result?: JournalPayload;
 }
 export interface ToolIntent extends Omit<IntentTransition, 'status'> {
+  idempotency_key?: string;
   status: IntentTransition['status'] | 'PREPARED';
   tool_name: string;
   args_digest: string;

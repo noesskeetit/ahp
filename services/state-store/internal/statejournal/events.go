@@ -83,11 +83,14 @@ func (s *Store) AppendEvents(ctx context.Context, scope contracts.Scope, session
 	switch {
 	case err == nil && slices.Equal(stored, digest[:]):
 		receipt.Control = savedControl
-		if savedControl != nil && savedControl.NextTurn != nil &&
-			(lockErr != nil || turn.Seq != savedControl.NextTurn.InputSeq) {
-			// Replaying the result is safe. The old receipt must not grant
-			// permission to run a followup that has moved on.
-			receipt.Control = nil
+		if savedControl != nil && savedControl.NextTurn != nil {
+			if lockErr != nil || turn.Seq != savedControl.NextTurn.InputSeq {
+				// Keep the historical sequences without granting a followup
+				// that no longer belongs to this lease and turn.
+				receipt.Control = nil
+			} else {
+				receipt.Control.NextTurn.ExpiresAt = *turn.ExpiresAt
+			}
 		}
 		if receipt.Control == nil && lockErr == nil && request.TurnSeq == turn.Seq {
 			receipt.Control, err = peekControl(ctx, tx, scope, session, turn)
@@ -157,7 +160,7 @@ func (s *Store) AppendEvents(ctx context.Context, scope contracts.Scope, session
 	if err := prepareIntents(ctx, tx, scope.Tenant, session, lease.Epoch, request.Intents); err != nil {
 		return AppendReceipt{}, err
 	}
-	if err := commitOutcomes(ctx, tx, scope.Tenant, session, request.ToolOutcomes); err != nil {
+	if err := commitOutcomes(ctx, tx, scope.Tenant, session, turn.Mode == journal.ExecutionVMManaged, request.ToolOutcomes); err != nil {
 		return AppendReceipt{}, err
 	}
 	if err := updateHead(ctx, tx, scope.Tenant, session, receipt.HeadSeq, request.Pointers); err != nil {

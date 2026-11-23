@@ -189,10 +189,17 @@ func TestOAuthHumanHTTPProxyRealPostgresVault(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, b
 	}
-	if status, body := invoke(); status != 409 || !bytes.Contains(body, []byte("AUTH_REQUIRED")) {
-		t.Fatalf("missing connection: %d %s", status, body)
+	status, body := invoke()
+	var authRequired struct {
+		Code   string `json:"code"`
+		Reason string `json:"reason"`
 	}
-	status, body := call(browser, token, "OAuthBegin", map[string]string{"connection": "personal"})
+	if err := json.Unmarshal(body, &authRequired); err != nil || status != http.StatusConflict ||
+		authRequired.Code != "AUTH_REQUIRED" || authRequired.Reason != "AUTH_REQUIRED" {
+		t.Fatalf("missing connection: %d %s (decode error: %v)", status, body, err)
+	}
+
+	status, body = call(browser, token, "OAuthBegin", map[string]string{"connection": "personal"})
 	if status != 200 {
 		t.Fatalf("begin status %d: %s", status, body)
 	}

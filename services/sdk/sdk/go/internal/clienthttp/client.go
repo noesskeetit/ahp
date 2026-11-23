@@ -156,33 +156,43 @@ func (c *Client) Call(ctx context.Context, path string, input, out any, mutation
 }
 
 func (c *Client) CallMethod(ctx context.Context, method, path string, input, out any, mutation bool) error {
+	_, err := c.call(ctx, method, path, input, out, mutation)
+	return err
+}
+
+// CallWithStatus distinguishes success envelopes with different HTTP statuses.
+func (c *Client) CallWithStatus(ctx context.Context, path string, input, out any, mutation bool) (int, error) {
+	return c.call(ctx, http.MethodPost, path, input, out, mutation)
+}
+
+func (c *Client) call(ctx context.Context, method, path string, input, out any, mutation bool) (int, error) {
 	r, e := c.requestMethod(ctx, method, path, input, "application/json")
 	if e != nil {
 		var ce *contracts.Error
 		if errors.As(e, &ce) {
-			return e
+			return 0, e
 		}
-		return failure(ctx, mutation)
+		return 0, failure(ctx, mutation)
 	}
 	defer r.Body.Close()
 	b, e := io.ReadAll(io.LimitReader(r.Body, MaxBytes+1))
 	if e != nil {
-		return failure(ctx, mutation)
+		return r.StatusCode, failure(ctx, mutation)
 	}
 	if len(b) > MaxBytes {
-		return &Error{Status: r.StatusCode, Code: "INVALID_RESPONSE", Message: "response exceeds 16 MiB", OutcomeUnknown: mutation}
+		return r.StatusCode, &Error{Status: r.StatusCode, Code: "INVALID_RESPONSE", Message: "response exceeds 16 MiB", OutcomeUnknown: mutation}
 	}
 	if r.StatusCode < 200 || r.StatusCode >= 300 {
 		err := status(r.StatusCode, b)
 		if api, ok := err.(*Error); ok && mutation && r.StatusCode >= 500 {
 			api.OutcomeUnknown = true
 		}
-		return err
+		return r.StatusCode, err
 	}
 	if out != nil && json.Unmarshal(b, out) != nil {
-		return &Error{Status: r.StatusCode, Code: "INVALID_RESPONSE", Message: "invalid JSON", OutcomeUnknown: mutation}
+		return r.StatusCode, &Error{Status: r.StatusCode, Code: "INVALID_RESPONSE", Message: "invalid JSON", OutcomeUnknown: mutation}
 	}
-	return nil
+	return r.StatusCode, nil
 }
 
 // Lines owns the body until callback returns false or the stream ends. No reconnect.

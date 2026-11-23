@@ -43,15 +43,15 @@ func (s *Store) inspectSession(ctx context.Context, scope contracts.Scope, sessi
 		return ResumeState{}, err
 	}
 	rows, err := tx.Query(ctx, `
-		SELECT call_id,status,coalesce(gateway_operation_id,''),tool_name,args_digest
+		SELECT call_id,status,coalesce(gateway_operation_id,''),tool_name,args_digest,idempotency_key
 		FROM ahp_journal.tool_intents WHERE tenant_id=$1 AND session_id=$2
-		  AND status IN ('PREPARED','DISPATCHED') ORDER BY call_id`, scope.Tenant, session)
+		  AND status IN ('PREPARED','DISPATCHED','AWAITING_APPROVAL','AWAITING_AUTH') ORDER BY call_id`, scope.Tenant, session)
 	if err != nil {
 		return ResumeState{}, err
 	}
 	state.Unresolved, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (ToolIntent, error) {
 		var tool ToolIntent
-		err := row.Scan(&tool.CallID, &tool.Status, &tool.GatewayOperationID, &tool.ToolName, &tool.ArgsDigest)
+		err := row.Scan(&tool.CallID, &tool.Status, &tool.GatewayOperationID, &tool.ToolName, &tool.ArgsDigest, &tool.IdempotencyKey)
 		return tool, err
 	})
 	if err != nil {

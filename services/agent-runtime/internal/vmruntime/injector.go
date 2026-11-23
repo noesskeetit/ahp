@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,22 +26,33 @@ import (
 	"github.com/ahp-platform/ahp/pkg/transport"
 )
 
-const injectorSessions = "/v1/state/sessions/"
+const (
+	injectorSessions = "/v1/state/sessions/"
+	injectorTools    = "/v1/tools/"
+)
 
 type InjectorConfig struct {
-	StateURL  string
-	ClientFor func(context.Context, contracts.Scope) (*http.Client, error)
-	MintToken func(context.Context, Execution) (string, error)
+	StateURL       string
+	ClientFor      func(context.Context, contracts.Scope) (*http.Client, error)
+	ToolsURL       string
+	ToolsClientFor func(context.Context, contracts.Scope) (*http.Client, error)
+	MintToken      func(context.Context, Execution) (string, error)
 }
 
 // Injector owns a separate listener, cancellation scope and task token for
 // each physical attempt. The host still owns the execution grant.
 type Injector struct {
-	stateURL  *url.URL
-	clientFor func(context.Context, contracts.Scope) (*http.Client, error)
+	state     injectorUpstream
+	tools     injectorUpstream
 	mintToken func(context.Context, Execution) (string, error)
 	mu        sync.Mutex
 	attempts  map[string]*injectorAttempt
+}
+
+type injectorUpstream struct {
+	origin    *url.URL
+	name      string
+	clientFor func(context.Context, contracts.Scope) (*http.Client, error)
 }
 
 type injectorAttempt struct {
@@ -54,17 +66,39 @@ type injectorAttempt struct {
 }
 
 func NewInjector(config InjectorConfig) (*Injector, error) {
-	origin, err := url.Parse(config.StateURL)
+	stateURL := injectorOrigin(config.StateURL)
+	if stateURL == nil || config.ClientFor == nil || config.MintToken == nil {
+		return nil, contracts.NewError(contracts.ErrInvalid, "injector requires an HTTPS State API origin and credential providers")
+	}
+	var toolsURL *url.URL
+	if config.ToolsURL != "" {
+		toolsURL = injectorOrigin(config.ToolsURL)
+		if toolsURL == nil || config.ToolsClientFor == nil {
+			return nil, contracts.NewError(contracts.ErrInvalid, "injector requires an HTTPS Tool Gateway origin and a tools credential provider")
+		}
+	}
+	return &Injector{
+		state:     injectorUpstream{origin: stateURL, name: "State API", clientFor: config.ClientFor},
+		tools:     injectorUpstream{origin: toolsURL, name: "Tool Gateway", clientFor: config.ToolsClientFor},
+		mintToken: config.MintToken,
+		attempts:  make(map[string]*injectorAttempt),
+	}, nil
+}
+
+func injectorOrigin(raw string) *url.URL {
+	origin, err := url.Parse(raw)
 	if err != nil || origin.Scheme != "https" || origin.Hostname() == "" ||
 		origin.User != nil || origin.Opaque != "" || origin.RawPath != "" ||
 		(origin.Path != "" && origin.Path != "/") || origin.RawQuery != "" ||
-		origin.ForceQuery || origin.Fragment != "" || config.ClientFor == nil || config.MintToken == nil {
-		return nil, contracts.NewError(contracts.ErrInvalid, "injector requires an HTTPS State API origin and credential providers")
+		origin.ForceQuery || strings.ContainsRune(raw, '#') || strings.HasSuffix(origin.Host, ":") {
+		return nil
 	}
-	return &Injector{
-		stateURL: origin, clientFor: config.ClientFor, mintToken: config.MintToken,
-		attempts: make(map[string]*injectorAttempt),
-	}, nil
+	if port := origin.Port(); port != "" {
+		if value, err := strconv.ParseUint(port, 10, 16); err != nil || value == 0 {
+			return nil
+		}
+	}
+	return origin
 }
 
 // Start opens the socket before returning. The attempt remains live after
@@ -175,7 +209,7 @@ func (i *Injector) closeAttempt(id string, attempt *injectorAttempt) error {
 
 func (i *Injector) serveAttempt(attempt *injectorAttempt, w http.ResponseWriter, r *http.Request) {
 	abortCanceledInjectorRequest(r.Context())
-	path, _, _ := strings.Cut(r.RequestURI, "?")
+	path, _, hasQuery := strings.Cut(r.RequestURI, "?")
 	if r.URL.IsAbs() || r.URL.Opaque != "" || r.URL.Host != "" || path != r.URL.EscapedPath() {
 		injectorForbidden(w, r)
 		return
@@ -186,6 +220,19 @@ func (i *Injector) serveAttempt(attempt *injectorAttempt, w http.ResponseWriter,
 		return
 	}
 	exec := attempt.guest.Execution
+	if strings.HasPrefix(path, injectorTools) {
+		if i.tools.origin == nil || r.Method != http.MethodPost || hasQuery {
+			injectorForbidden(w, r)
+			return
+		}
+		body, allowed := injectorToolBody(w, r, path, exec)
+		if !allowed {
+			injectorForbidden(w, r)
+			return
+		}
+		i.forward(attempt, w, r, i.tools, nil, body)
+		return
+	}
 	if r.Method == http.MethodGet && path == "/v1/runtime/bootstrap" && len(query) == 0 && r.Body == http.NoBody {
 		transport.WriteJSON(w, http.StatusOK, journal.RuntimeBootstrap{
 			Scope: exec.Scope, SessionID: exec.SessionID, Harness: exec.Harness,
@@ -208,7 +255,7 @@ func (i *Injector) serveAttempt(attempt *injectorAttempt, w http.ResponseWriter,
 		injectorForbidden(w, r)
 		return
 	}
-	i.forward(attempt, w, r, query, body)
+	i.forward(attempt, w, r, i.state, query, body)
 }
 
 func injectorForbidden(w http.ResponseWriter, r *http.Request) {
@@ -346,9 +393,41 @@ func injectorSessionKV(mutations []journal.KVMutation) bool {
 	return true
 }
 
-// ReadJSON applies the State API's byte and duplicate-key limits. Checking the
+type injectorToolLease struct {
+	SessionID string `json:"session_id"`
+	Epoch     int64  `json:"lease_epoch"`
+	Proof     string `json:"tool_lease_proof"`
+	Key       string `json:"key"`
+}
+
+func (lease injectorToolLease) validFor(exec Execution) bool {
+	return lease.SessionID == exec.SessionID && lease.Epoch >= exec.Generation && lease.Proof != "" && lease.Key != ""
+}
+
+func injectorToolBody(w http.ResponseWriter, r *http.Request, path string, exec Execution) ([]byte, bool) {
+	switch path {
+	case injectorTools + "Call":
+		var req struct {
+			injectorToolLease
+			Tool      string          `json:"tool"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		body, ok := injectorJSON(w, r, &req, 1<<20)
+		return body, ok && req.validFor(exec) && req.Tool != "" && json.Valid(req.Arguments)
+	case injectorTools + "FenceAndLookup":
+		var req injectorToolLease
+		body, ok := injectorJSON(w, r, &req, 1<<20)
+		return body, ok && req.validFor(exec)
+	case injectorTools + "ConnectionState":
+		return injectorJSON(w, r, &struct{}{}, 4096)
+	default:
+		return nil, false
+	}
+}
+
+// ReadJSON applies byte and duplicate-key limits. Checking the
 // outer wire names also excludes the standard decoder's case-folded aliases
-// for session, generation and release selectors.
+// for session, generation and release selectors, including Unicode aliases.
 func injectorJSON(w http.ResponseWriter, r *http.Request, request any, maxBytes int64) ([]byte, bool) {
 	var raw bytes.Buffer
 	original := r.Body
@@ -361,7 +440,7 @@ func injectorJSON(w http.ResponseWriter, r *http.Request, request any, maxBytes 
 		return nil, false
 	}
 	for field := range fields {
-		if strings.ToLower(field) != field {
+		if strings.ToLower(field) != field || strings.ContainsFunc(field, func(r rune) bool { return r > 127 }) {
 			return nil, false
 		}
 	}
@@ -373,7 +452,7 @@ func injectorJSON(w http.ResponseWriter, r *http.Request, request any, maxBytes 
 	return raw.Bytes(), true
 }
 
-func (i *Injector) forward(attempt *injectorAttempt, w http.ResponseWriter, r *http.Request, query url.Values, body []byte) {
+func (i *Injector) forward(attempt *injectorAttempt, w http.ResponseWriter, r *http.Request, upstream injectorUpstream, query url.Values, body []byte) {
 	ctx := r.Context()
 	token, err := i.attemptToken(ctx, attempt)
 	abortCanceledInjectorRequest(ctx)
@@ -381,15 +460,15 @@ func (i *Injector) forward(attempt *injectorAttempt, w http.ResponseWriter, r *h
 		transport.WriteError(w, r, unavailable("injector task credentials unavailable"))
 		return
 	}
-	client, err := i.clientFor(ctx, attempt.guest.Execution.Scope)
+	client, err := upstream.clientFor(ctx, attempt.guest.Execution.Scope)
 	abortCanceledInjectorRequest(ctx)
 	if err != nil || client == nil {
-		transport.WriteError(w, r, unavailable("injector State API client unavailable"))
+		transport.WriteError(w, r, unavailable("injector "+upstream.name+" client unavailable"))
 		return
 	}
-	// The fixed State origin and fresh request keep guest headers, cookies,
+	// The fixed origin and fresh request keep guest headers, cookies,
 	// hop-by-hop fields and URL authority out of the trusted request.
-	destination := *i.stateURL
+	destination := *upstream.origin
 	destination.Path = r.URL.Path
 	destination.RawPath = injectorStatePath(r.URL.EscapedPath())
 	destination.RawQuery = query.Encode()
@@ -408,13 +487,13 @@ func (i *Injector) forward(attempt *injectorAttempt, w http.ResponseWriter, r *h
 	response, err := outbound.Do(request)
 	if err != nil {
 		abortCanceledInjectorRequest(ctx)
-		transport.WriteError(w, r, unavailable("injector State API request failed"))
+		transport.WriteError(w, r, unavailable("injector "+upstream.name+" request failed"))
 		return
 	}
 	defer response.Body.Close()
 	abortCanceledInjectorRequest(ctx)
 	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		transport.WriteError(w, r, unavailable("injector State API returned an unexpected redirect"))
+		transport.WriteError(w, r, unavailable("injector "+upstream.name+" returned an unexpected redirect"))
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")

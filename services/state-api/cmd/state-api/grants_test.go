@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -149,5 +150,46 @@ func TestStateCoordinatorDeniesOfflineGrantPolicy(t *testing.T) {
 				t.Errorf("offline route %s returned %d, want %d", tc.path, w.Code, tc.want)
 			}
 		}
+	}
+}
+
+func TestStateToolLeaseKeyConfigurationFailsClosed(t *testing.T) {
+	pub, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	valid := filepath.Join(dir, "proof-private.pem")
+	invalid := filepath.Join(dir, "invalid-proof.pem")
+	if err := os.WriteFile(valid, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(invalid, []byte("invalid"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	verifier := auth.NewVerifier("test", map[string]ed25519.PublicKey{"test": pub})
+	for _, test := range []struct {
+		name, key, issuer, kid string
+		wantError              bool
+	}{
+		{name: "disabled"},
+		{name: "enabled", key: valid, issuer: "state", kid: "proof"},
+		{name: "no key", issuer: "state", kid: "proof", wantError: true},
+		{name: "no issuer", key: valid, kid: "proof", wantError: true},
+		{name: "no kid", key: valid, issuer: "state", wantError: true},
+		{name: "bad key", key: invalid, issuer: "state", kid: "proof", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			env := map[string]string{"AHP_STATE_TOOL_LEASE_KEY": test.key,
+				"AHP_STATE_TOOL_LEASE_ISSUER": test.issuer, "AHP_STATE_TOOL_LEASE_KID": test.kid}
+			_, err := stateHandler(statejournal.New(nil), verifier, authorizeClaims, false, func(k string) string { return env[k] })
+			if (err != nil) != test.wantError {
+				t.Fatalf("state handler start: %v, expected error=%t", err, test.wantError)
+			}
+		})
 	}
 }

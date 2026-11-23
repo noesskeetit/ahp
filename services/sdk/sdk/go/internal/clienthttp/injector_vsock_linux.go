@@ -1,6 +1,6 @@
 //go:build linux
 
-package journal
+package clienthttp
 
 import (
 	"context"
@@ -11,18 +11,17 @@ import (
 	"time"
 
 	"github.com/ahp-platform/ahp/pkg/contracts"
-	"github.com/ahp-platform/ahp/sdk/go/internal/clienthttp"
 	"golang.org/x/sys/unix"
 )
 
-// NewVSockInjectorClient connects to the mount's host CID over virtio-vsock.
-func NewVSockInjectorClient(port uint32) (*Client, error) {
+// NewVSockInjector connects to the mount's host CID over virtio-vsock.
+func NewVSockInjector(port uint32) (*Client, error) {
 	if port == 0 || port >= 1<<30 {
 		return nil, contracts.NewError(contracts.ErrInvalid, "invalid guest-to-host injector port")
 	}
-	return &Client{http: clienthttp.NewLocal(func(ctx context.Context) (net.Conn, error) {
+	return NewLocal(func(ctx context.Context) (net.Conn, error) {
 		return dialInjectorVSock(ctx, port)
-	})}, nil
+	}), nil
 }
 
 func dialInjectorVSock(ctx context.Context, port uint32) (net.Conn, error) {

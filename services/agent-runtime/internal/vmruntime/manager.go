@@ -39,10 +39,11 @@ type GrantStore interface {
 }
 
 type Manager struct {
-	Pool      *pgxpool.Pool
-	Grants    GrantStore
-	PlaceHost func(Execution) string
-	Host      func(string) (ExecutionHost, error)
+	Pool         *pgxpool.Pool
+	Grants       GrantStore
+	PlaceHost    func(Execution) string
+	Host         func(string) (ExecutionHost, error)
+	ToolsAllowed func(contracts.Scope) bool
 }
 
 func (m Manager) Migrate(ctx context.Context) error {
@@ -152,9 +153,13 @@ func (m Manager) start(ctx context.Context, exec Execution, hostID string, attem
 	if err != nil {
 		return unavailable("execution host unavailable")
 	}
+	capabilities := []string{"state", "state.vm_claim"}
+	if m.ToolsAllowed != nil && m.ToolsAllowed(exec.Scope) {
+		capabilities = append(capabilities, "tools", "tools.leased")
+	}
 	grant, err := m.Grants.CreateRoot(ctx, exec.Scope, identity.RootRequest{
-		Deployment: exec.Scope.Deployment, Task: exec.ID, Context: "vm:" + exec.ID,
-		Capabilities: []string{"state", "state.vm_claim"}, TTL: time.Hour,
+		Deployment: exec.Scope.Deployment, Task: exec.ID,
+		Context: journal.VMSessionContextID(exec.Scope, exec.SessionID), Capabilities: capabilities, TTL: time.Hour,
 	})
 	if err != nil {
 		return err

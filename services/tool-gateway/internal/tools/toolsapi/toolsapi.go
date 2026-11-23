@@ -37,6 +37,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/ahp-platform/ahp/internal/operations"
@@ -63,12 +64,13 @@ const (
 
 // Handler is the mounted tool gateway: POST /v1/tools/{Operation}.
 type Handler struct {
-	svc        *tools.Service
-	task       func(http.Handler) http.Handler
-	human      func(http.Handler) http.Handler
-	oauthHuman func(http.Handler) http.Handler
-	routes     map[string]func(http.ResponseWriter, *http.Request)
-	leaseProof *auth.Verifier
+	svc         *tools.Service
+	task        func(http.Handler) http.Handler
+	human       func(http.Handler) http.Handler
+	oauthHuman  func(http.Handler) http.Handler
+	routes      map[string]func(http.ResponseWriter, *http.Request)
+	leaseProof  *auth.Verifier
+	strictLease bool
 }
 
 // NewHandler builds the tool-gateway HTTP face. Every dependency is mandatory:
@@ -82,10 +84,29 @@ func NewHandler(svc *tools.Service, verifier *auth.Verifier, authorize transport
 // carry State API lease proof. Mount this instead of the legacy task handler
 // for the deployment. Lease verification uses the dedicated State public key.
 func NewHandlerWithToolLeases(ctx context.Context, svc *tools.Service, verifier *auth.Verifier, authorize transport.Authorize, leaseProof *auth.Verifier) (http.Handler, error) {
+	return NewHandlerWithToolLeasesAndUsers(ctx, svc, verifier, authorize, leaseProof, "", nil)
+}
+
+// NewHandlerWithToolLeasesAndUsers requires a State proof on every tool call
+// and preserves the independent browser Identity guards on human routes.
+func NewHandlerWithToolLeasesAndUsers(ctx context.Context, svc *tools.Service, verifier *auth.Verifier, authorize transport.Authorize,
+	leaseProof *auth.Verifier, userAudience string, humanAuthorize transport.Authorize) (http.Handler, error) {
+	return newHandlerWithToolLeases(ctx, svc, verifier, authorize, leaseProof, userAudience, humanAuthorize, true)
+}
+
+// NewCoexistingHandlerWithToolLeases allows existing task clients and requires
+// lease proof for VM principals, without a downgrade to an unleased operation.
+func NewCoexistingHandlerWithToolLeases(ctx context.Context, svc *tools.Service, verifier *auth.Verifier, authorize transport.Authorize,
+	leaseProof *auth.Verifier, userAudience string, humanAuthorize transport.Authorize) (http.Handler, error) {
+	return newHandlerWithToolLeases(ctx, svc, verifier, authorize, leaseProof, userAudience, humanAuthorize, false)
+}
+
+func newHandlerWithToolLeases(ctx context.Context, svc *tools.Service, verifier *auth.Verifier, authorize transport.Authorize,
+	leaseProof *auth.Verifier, userAudience string, humanAuthorize transport.Authorize, strict bool) (http.Handler, error) {
 	if leaseProof == nil {
 		return nil, contracts.NewError(contracts.ErrInvalid, "toolsapi: State verifier required")
 	}
-	h, err := newHandler(svc, verifier, authorize, "", nil)
+	h, err := newHandler(svc, verifier, authorize, userAudience, humanAuthorize)
 	if err != nil {
 		return nil, err
 	}
@@ -93,10 +114,13 @@ func NewHandlerWithToolLeases(ctx context.Context, svc *tools.Service, verifier 
 		return nil, err
 	}
 	h.leaseProof = leaseProof
+	h.strictLease = strict
 	h.routes["FenceAndLookup"] = h.fenceAndLookup
-	delete(h.routes, "Get")
-	delete(h.routes, "GetResult")
-	delete(h.routes, "Fence")
+	if strict {
+		delete(h.routes, "Get")
+		delete(h.routes, "GetResult")
+		delete(h.routes, "Fence")
+	}
 	return h, nil
 }
 
@@ -187,7 +211,39 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(rest, "OAuth") {
 		gate = h.oauthHuman
 	}
-	gate(http.HandlerFunc(fn)).ServeHTTP(w, r)
+	gate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p, ok := transport.FromContext(r.Context()); ok && p.Claims.Kind == auth.KindTask && isLeasedTaskPrincipal(p.Claims) {
+			switch rest {
+			case "Call":
+				if h.leaseProof == nil {
+					transport.WriteError(w, r, leaseVerifierRequired())
+					return
+				}
+			case "Get", "GetResult", "Fence":
+				transport.WriteError(w, r, leaseVerifierRequired())
+				return
+			}
+		}
+		fn(w, r)
+	})).ServeHTTP(w, r)
+}
+
+func isLeasedTaskPrincipal(claims auth.Claims) bool {
+	return slices.Contains(claims.Capabilities, "tools.leased") || strings.HasPrefix(claims.Context, "vm-session:")
+}
+
+func leaseVerifierRequired() error {
+	return contracts.NewError(contracts.ErrForbidden, "toolsapi: leased task principal requires a lease-verifying Tool Gateway")
+}
+
+// An internal leased ledger key must only be reachable through the lease
+// authority. Public legacy keys are otherwise unaffected in coexistence mode.
+func (h *Handler) blockInternalLeaseKey(w http.ResponseWriter, r *http.Request, key string) bool {
+	if h.leaseProof == nil || !tools.IsLeasedOperationKey(key) {
+		return false
+	}
+	transport.WriteError(w, r, contracts.NewError(contracts.ErrForbidden, "toolsapi: leased operation keys require lease proof"))
+	return true
 }
 
 // scope reads the isolation scope from the verified principal.
@@ -230,35 +286,39 @@ func (h *Handler) call(w http.ResponseWriter, r *http.Request) {
 	}
 	prov := tools.CallProvenance{TaskID: p.Claims.Task, ContextID: p.Claims.Context}
 	var op operations.Operation
-	if h.leaseProof == nil {
-		if in.toolLeaseInput != (toolLeaseInput{}) {
-			transport.WriteError(w, r, contracts.NewError(contracts.ErrInvalid, "toolsapi: lease-aware endpoint required"))
-			return
-		}
-		op, err = h.svc.CallWithProvenance(r.Context(), scope, in.Key, in.Tool, in.Arguments, prov)
-	} else {
+	hasLease := in.toolLeaseInput != (toolLeaseInput{})
+	switch {
+	case h.leaseProof == nil && hasLease:
+		transport.WriteError(w, r, contracts.NewError(contracts.ErrInvalid, "toolsapi: lease-aware endpoint required"))
+		return
+	case h.leaseProof != nil && (h.strictLease || hasLease || isLeasedTaskPrincipal(p.Claims)):
 		lease, verifyErr := h.verifiedToolLease(p.Claims, in.toolLeaseInput)
 		if verifyErr != nil {
 			transport.WriteError(w, r, verifyErr)
 			return
 		}
 		op, err = h.svc.CallWithToolLease(r.Context(), scope, in.Key, in.Tool, in.Arguments, prov, lease)
+	default:
+		if h.blockInternalLeaseKey(w, r, in.Key) {
+			return
+		}
+		op, err = h.svc.CallWithProvenance(r.Context(), scope, in.Key, in.Tool, in.Arguments, prov)
 	}
 	if err != nil {
 		if errors.Is(err, tools.ErrAuthRequired) {
-			transport.WriteJSON(w, http.StatusConflict, map[string]string{"code": "AUTH_REQUIRED", "status": "auth-required", "message": "Подключите личный аккаунт в разделе подключений"})
+			transport.WriteJSON(w, http.StatusConflict, map[string]string{"code": "AUTH_REQUIRED", "reason": "AUTH_REQUIRED", "status": "auth-required", "message": "Подключите личный аккаунт в разделе подключений"})
 			return
 		}
 		if errors.Is(err, tools.ErrApprovalDeclined) {
 			// A refusal already given is not a refusal waiting for an answer:
 			// report it explicitly so no one re-prompts the employee or retries
 			// the same operation key.
-			transport.WriteError(w, r, contracts.NewError(contracts.ErrConflict,
+			transport.WriteError(w, r, contracts.NewReasoned(contracts.ErrConflict, "APPROVAL_DECLINED",
 				"toolsapi: the employee declined this operation; retry needs a new operation key and a fresh human decision"))
 			return
 		}
 		if errors.Is(err, tools.ErrApprovalRequired) {
-			transport.WriteError(w, r, contracts.NewError(contracts.ErrConflict,
+			transport.WriteError(w, r, contracts.NewReasoned(contracts.ErrConflict, "APPROVAL_REQUIRED",
 				"toolsapi: human approval required for this canonical action digest"))
 			return
 		}
@@ -288,6 +348,9 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		transport.WriteError(w, r, err)
 		return
 	}
+	if h.blockInternalLeaseKey(w, r, in.Key) {
+		return
+	}
 	op, err := h.svc.Get(r.Context(), scope, in.Key)
 	if err != nil {
 		transport.WriteError(w, r, err)
@@ -314,6 +377,9 @@ func (h *Handler) getResult(w http.ResponseWriter, r *http.Request) {
 		transport.WriteError(w, r, err)
 		return
 	}
+	if h.blockInternalLeaseKey(w, r, in.Key) {
+		return
+	}
 	res, err := h.svc.GetResult(r.Context(), p.Scope,
 		tools.ResultReader{TaskID: p.Claims.Task, ContextID: p.Claims.Context}, in.Key)
 	if err != nil {
@@ -334,6 +400,9 @@ func (h *Handler) fence(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := transport.ReadJSON(w, r, &in, maxBody); err != nil {
 		transport.WriteError(w, r, err)
+		return
+	}
+	if h.blockInternalLeaseKey(w, r, in.Key) {
 		return
 	}
 	op, err := h.svc.Fence(r.Context(), scope, in.Key)

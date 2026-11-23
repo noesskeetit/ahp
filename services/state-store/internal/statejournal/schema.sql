@@ -246,7 +246,8 @@ CREATE TABLE IF NOT EXISTS ahp_journal.tool_intents (
     args_digest bytea NOT NULL CHECK (octet_length(args_digest) = 32),
     idempotency_key text NOT NULL,
     gateway_operation_id text,
-    status text NOT NULL CHECK (status IN ('PREPARED', 'DISPATCHED', 'COMPLETED', 'OUTCOME_UNKNOWN')),
+    status text NOT NULL CONSTRAINT tool_intents_known_status
+        CHECK (status IN ('PREPARED','DISPATCHED','AWAITING_APPROVAL','AWAITING_AUTH','COMPLETED','REFUSED','OUTCOME_UNKNOWN')),
     response_payload bytea,
     response_blob_ref jsonb,
     PRIMARY KEY (tenant_id, session_id, call_id),
@@ -260,9 +261,22 @@ CREATE TABLE IF NOT EXISTS ahp_journal.tool_intents (
 ALTER TABLE ahp_journal.tool_intents
     ADD COLUMN IF NOT EXISTS prepared_epoch bigint CHECK (prepared_epoch > 0);
 
-CREATE INDEX IF NOT EXISTS tool_intents_unresolved_idx
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='ahp_journal.tool_intents'::regclass AND conname='tool_intents_known_status'
+    ) THEN
+        ALTER TABLE ahp_journal.tool_intents DROP CONSTRAINT IF EXISTS tool_intents_status_check;
+        ALTER TABLE ahp_journal.tool_intents ADD CONSTRAINT tool_intents_known_status
+            CHECK (status IN ('PREPARED','DISPATCHED','AWAITING_APPROVAL','AWAITING_AUTH','COMPLETED','REFUSED','OUTCOME_UNKNOWN'));
+    END IF;
+END $$;
+
+DROP INDEX IF EXISTS ahp_journal.tool_intents_unresolved_idx;
+CREATE INDEX IF NOT EXISTS tool_intents_pending_idx
     ON ahp_journal.tool_intents (tenant_id, session_id, call_id)
-    WHERE status IN ('PREPARED', 'DISPATCHED');
+    WHERE status IN ('PREPARED','DISPATCHED','AWAITING_APPROVAL','AWAITING_AUTH');
 
 -- Lineage is validated by the leased writer. Parent row references would
 -- otherwise prevent bounded retention of the original history.

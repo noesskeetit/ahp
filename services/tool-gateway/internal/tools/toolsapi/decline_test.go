@@ -24,6 +24,9 @@ func TestDeclineRouteRefusesTheEffect(t *testing.T) {
 
 	status, body := e.call(t, "Call", tok, `{"key":"k-d-1","tool":"gated","arguments":`+args+`}`)
 	mustStatus(t, status, http.StatusConflict, body)
+	if body["reason"] != "APPROVAL_REQUIRED" {
+		t.Fatalf("approval required must be machine-readable: %v", body)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -46,7 +49,7 @@ func TestDeclineRouteRefusesTheEffect(t *testing.T) {
 	if status != http.StatusConflict {
 		t.Fatalf("retry after decline = %d %v, want 409", status, body)
 	}
-	if msg, _ := body["message"].(string); !containsDeclined(msg) {
+	if msg, _ := body["message"].(string); !containsDeclined(msg) || body["reason"] != "APPROVAL_DECLINED" {
 		t.Fatalf("retry must name the decline, got %v", body)
 	}
 	// Nothing executed and the answer is not re-askable.

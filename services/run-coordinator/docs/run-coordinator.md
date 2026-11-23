@@ -72,9 +72,27 @@ Use the Firecracker settings documented in the compute supervisor configuration.
 
 A trusted process worker receives `AHP_INJECTOR_SOCKET` and uses Go SDK `NewUnixInjectorClient` and `RuntimeBootstrap`. A Firecracker guest uses `NewVSockInjectorClient(RuntimeInjectorVSockPort)` and the same bootstrap operation. The guest image supplies its worker and supports Linux virtio-vsock. Firecracker connects the guest port to the host listener for the current attempt. [Firecracker vsock protocol](https://github.com/firecracker-microvm/firecracker/blob/main/docs/vsock.md#guest-initiated-connections)
 
+## Tool calls from managed VMs
+
+Enable tools for specific deployments through Runtime. Each generation gets a new task grant. The same tenant, deployment, subject and session produce one Gateway context across replacement generations, so a replacement can look up the original receipt.
+
+| Configuration | Use |
+|---|---|
+| `AHP_VM_RUNTIME_TOOLS_DEPLOYMENTS` | Exact comma-separated `tenant/deployment` entries allowed to use tools |
+| `AHP_VM_RUNTIME_TOOLS_URL`, `AHP_VM_RUNTIME_TOOLS_CA` | Fixed Tool Gateway HTTPS origin and optional separate trust root |
+| `AHP_STATE_TOOL_LEASE_ISSUER`, `AHP_STATE_TOOL_LEASE_KID`, `AHP_STATE_TOOL_LEASE_KEY` | State API issuer, signing key ID and private Ed25519 PEM path |
+| `AHP_TOOLS_LEASE_ISSUER`, `AHP_TOOLS_LEASE_KID`, `AHP_TOOLS_LEASE_PUBLIC_KEY` | Matching Tool Gateway verifier configuration and public PEM path |
+| `AHP_TOOLS_LEASE_REQUIRED=1` | Require proof for all task calls on a dedicated leased gateway. Omit on an origin shared with legacy runners |
+
+Drain or fence old executions before enabling a deployment. The next execution receives the updated grant. The Gateway requires live Identity authorization. The injector forwards only the leased call and lookup plus connection status to its configured origin.
+
+The Go guest creates a `journal.VMLease` from the claim. `RunVMHeartbeatWithControl` refreshes it and `ApplyFinish` installs the proof for a promoted follow-up. The guest prepares the intent in State and passes its stable call ID, operation key, tool name and original argument bytes to `tools.Client.SettleLeasedCall`. State checks the epoch on every durable mutation. The Gateway checks the signed deadline and epoch again when it commits the right to dispatch. After a restart the guest resolves the same intent by key. A known receipt advances the journal, an in-flight call stays recoverable, an approval or connection gate parks the turn, and an unknown external outcome remains guarded for operator reconciliation.
+
+For results over 256 KiB, a Gateway with `JournalArtifacts` configured publishes a versioned reference. The Go SDK saves that compact descriptor inline in the journal. The standalone platform Gateway mount does not provision an artifact owner for tools. Configure an artifact owner before running tools that return larger results. If a Gateway has already stored an oversized inline receipt, the SDK leaves the State intent dispatched and the owner retains the original receipt for reconciliation.
+
 ## Acceptance
 
-Run the State, Coordinator, Runtime, Compute and Go SDK suites with `-race` on disposable PostgreSQL 18 and MinIO. Run packages sequentially against the same database because journal tests rerun migrations. The process integration tests exercise the coordinator, State, Identity and Runtime over mutual TLS and the guest SDK over its Unix socket. Firecracker boot, vsock inside a real guest and hypervisor isolation need a separate Linux host with `/dev/kvm` and delegated cgroup v2.
+Run the State, Coordinator, Runtime, Compute and Go SDK suites with `-race` on disposable PostgreSQL 18 and MinIO. Use separate disposable databases for State, Gateway and the coordinator integration tests. The coordinator scans all VM sessions in its database during reconciliation. The process integration tests exercise the coordinator, State, Identity and Runtime over mutual TLS and the guest SDK over its Unix socket. Firecracker boot, vsock inside a real guest and hypervisor isolation need a separate Linux host with `/dev/kvm` and delegated cgroup v2.
 
 ### Live PostgreSQL and Firecracker acceptance
 
@@ -97,3 +115,12 @@ AHP_FC_E2E=1 /tmp/ahp-runcoord.test -test.run '^TestV32FirecrackerPostgresE2E$' 
 ```
 
 The test uses the real coordinator, mTLS handlers, workload grants and State Store. Two tenants use the same public conversation ID. One guest processes a follow-up in place. The other saves a checkpoint, records a dispatch and freezes. The replacement reads the checkpoint and the pending intent, checks the dispatch decision, and finishes the SSE stream. A test event counts fixture tool invocations. The assertions also verify that the old grant is revoked and Firecracker resources are retired.
+
+
+For leased tools, select `TestV41FirecrackerGuest` in the guest init and run:
+
+```sh
+AHP_FC_E2E=1 /tmp/ahp-runcoord.test -test.run '^TestV41FirecrackerToolGatewayPostgres$' -test.count=2 -test.v
+```
+
+The v4.1 process tests cover pre-dispatch recovery, a lost Gateway reply, a lost upstream MCP reply, late completion, policy refusal and human approval or decline. The Firecracker test uses a live loopback MCP server through the Gateway, rotates the warm follow-up proof across expiry, restores the original receipt on the replacement guest and checks the SSE cursor and runtime cleanup. With local MinIO configured, `TestV41LargeToolResultPostgres` also checks the versioned descriptor for a result over the State inline limit.

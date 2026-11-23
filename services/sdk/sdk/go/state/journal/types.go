@@ -6,6 +6,16 @@ import (
 	"github.com/ahp-platform/ahp/pkg/contracts/journal"
 )
 
+const (
+	IntentPrepared         = journal.IntentPrepared
+	IntentDispatched       = journal.IntentDispatched
+	IntentAwaitingApproval = journal.IntentAwaitingApproval
+	IntentAwaitingAuth     = journal.IntentAwaitingAuth
+	IntentCompleted        = journal.IntentCompleted
+	IntentRefused          = journal.IntentRefused
+	IntentUnknown          = journal.IntentUnknown
+)
+
 type (
 	VMTurnClaimRequest     = journal.VMTurnClaimRequest
 	FenceRequeueRequest    = journal.FenceRequeueRequest

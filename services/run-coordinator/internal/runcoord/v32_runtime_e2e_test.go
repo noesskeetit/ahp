@@ -72,7 +72,7 @@ func processFixtureDriver(t *testing.T, dir string) (vmruntime.Driver, string) {
 	return driver, workerDir
 }
 
-func setupV32RuntimeIntegration(t *testing.T, scopes func(string) []contracts.Scope, conversation string, fixtureDriver v32FixtureDriver) *processIntegration {
+func setupV32RuntimeIntegration(t *testing.T, scopes func(string) []contracts.Scope, conversation string, fixtureDriver v32FixtureDriver, toolFixtures ...*v41GatewayFixture) *processIntegration {
 	t.Helper()
 	ctx, pool, db := openPG(t)
 	ids := identity.New(pool)
@@ -103,7 +103,21 @@ func setupV32RuntimeIntegration(t *testing.T, scopes func(string) []contracts.Sc
 		t.Fatal(err)
 	}
 	tokenSource := func(context.Context) (string, error) { return serviceToken, nil }
-	stateHandler, err := statejournal.NewHTTPWithCoordinator(db.store, verify, ids.Authorize, nil, []string{auth.WorkloadID(service)})
+	var stateSigner *auth.Signer
+	var toolsConfig vmruntime.InjectorConfig
+	var toolsAllowed func(contracts.Scope) bool
+	if len(toolFixtures) == 1 {
+		stateSigner, toolsConfig = toolFixtures[0].mount(t, ctx, pool, pki, ids, verify, workers)
+		toolsAllowed = func(scope contracts.Scope) bool {
+			for _, worker := range workers {
+				if scope == worker {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	stateHandler, err := statejournal.NewHTTPWithCoordinator(db.store, verify, ids.Authorize, stateSigner, []string{auth.WorkloadID(service)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +143,7 @@ func setupV32RuntimeIntegration(t *testing.T, scopes func(string) []contracts.Sc
 		stateClients[scope] = pki.client(t, stateServer, scope)
 	}
 	injector, err := vmruntime.NewInjector(vmruntime.InjectorConfig{
-		StateURL: stateServer.URL,
+		StateURL: stateServer.URL, ToolsURL: toolsConfig.ToolsURL, ToolsClientFor: toolsConfig.ToolsClientFor,
 		ClientFor: func(_ context.Context, scope contracts.Scope) (*http.Client, error) {
 			if client := stateClients[scope]; client != nil {
 				return client, nil
@@ -154,7 +168,7 @@ func setupV32RuntimeIntegration(t *testing.T, scopes func(string) []contracts.Sc
 	if err := os.Mkdir(host.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	manager := vmruntime.Manager{Pool: pool, Grants: ids, PlaceHost: func(vmruntime.Execution) string { return host.ID },
+	manager := vmruntime.Manager{Pool: pool, Grants: ids, ToolsAllowed: toolsAllowed, PlaceHost: func(vmruntime.Execution) string { return host.ID },
 		Host: func(string) (vmruntime.ExecutionHost, error) { return host, nil }}
 	if err := manager.Migrate(ctx); err != nil {
 		t.Fatal(err)
@@ -296,13 +310,22 @@ func runV32CoordinatorProcessGuest(parent context.Context, socket string) error 
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 	turn, err := sdk.ClaimVMTurn(ctx, boot.SessionID, journal.VMTurnClaimRequest{TurnSeq: boot.LaunchTurnSeq,
-		Generation: boot.Generation, ExecutionID: boot.ExecutionID, TTLMilliseconds: 30000})
+		Generation: boot.Generation, ExecutionID: boot.ExecutionID, TTLMilliseconds: 3000})
 	if err != nil {
 		return fmt.Errorf("claim: %w", err)
 	}
 	var input processInput
 	if err := json.Unmarshal(turn.Input.Inline, &input); err != nil {
 		return err
+	}
+	// The work mode is carried by the claimed input. Keep the short claim for
+	// the fence scenario, and give the other scenarios the normal lease.
+	if input.Mode != "fence" {
+		renewed, err := sdk.HeartbeatLease(ctx, boot.SessionID, turn.Epoch, 30*time.Second)
+		if err != nil {
+			return fmt.Errorf("extend lease for a non-frozen guest: %w", err)
+		}
+		turn.Lease, turn.ToolLeaseProof = renewed.Lease, renewed.ToolLeaseProof
 	}
 	switch input.Mode {
 	case "fence":
@@ -455,7 +478,7 @@ func runV32FrozenGuest(ctx context.Context, sdk *stateclient.Client, boot journa
 			return fmt.Errorf("dispatch tool: %+v, %v", decision, err)
 		}
 		if _, err := sdk.HeartbeatLease(ctx, boot.SessionID, turn.Epoch, 3*time.Second); err != nil {
-			return fmt.Errorf("shorten lease: %w", err)
+			return fmt.Errorf("renew lease before freezing: %w", err)
 		}
 		if err := os.WriteFile("worker.pid", []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
 			return err

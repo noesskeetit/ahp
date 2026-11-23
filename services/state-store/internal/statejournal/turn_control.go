@@ -19,6 +19,7 @@ type managedTurn struct {
 	Ack       int64
 	Followups int
 	Cancel    bool
+	ExpiresAt *time.Time
 }
 
 func (turn managedTurn) validate(seq int64, ack *journal.SteerAck) error {
@@ -170,7 +171,9 @@ func (s *Store) HeartbeatLeaseWithControl(ctx context.Context, scope contracts.S
 	defer tx.Rollback(ctx)
 	var turn managedTurn
 	err = tx.QueryRow(ctx, `UPDATE ahp_journal.sessions
-		SET lease_expires_at=clock_timestamp()+$7*interval '1 microsecond'
+		SET lease_expires_at=CASE WHEN execution_mode='vm_managed'
+			THEN greatest(lease_expires_at,clock_timestamp()+$7*interval '1 microsecond')
+			ELSE clock_timestamp()+$7*interval '1 microsecond' END
 		WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4
 		  AND lease_owner=$5 AND lease_epoch=$6 AND lease_expires_at > clock_timestamp()
 		  AND status <> 'DELETED'

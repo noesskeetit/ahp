@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -109,8 +112,45 @@ func toolsHumanAuthorize(humans humanPermissions, log *slog.Logger) transport.Au
 	}
 }
 
+// toolsLeaseVerifier loads the State signing key's public half. The task
+// JWT verifier remains independent, including in coexisting mode.
+func toolsLeaseVerifier(env func(string) string) (*auth.Verifier, bool, error) {
+	issuer := env("AHP_TOOLS_LEASE_ISSUER")
+	kid := env("AHP_TOOLS_LEASE_KID")
+	path := env("AHP_TOOLS_LEASE_PUBLIC_KEY")
+	strict := env("AHP_TOOLS_LEASE_REQUIRED") == "1"
+	if issuer == "" && kid == "" && path == "" && !strict {
+		return nil, false, nil
+	}
+	if strings.TrimSpace(issuer) == "" || strings.TrimSpace(kid) == "" || strings.TrimSpace(path) == "" {
+		return nil, false, fmt.Errorf("tools: tool lease verification requires issuer, kid and public key")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("tools: could not read the tool lease public key")
+	}
+	block, rest := pem.Decode(raw)
+	if block == nil || block.Type != "PUBLIC KEY" || len(bytes.TrimSpace(rest)) != 0 {
+		return nil, false, fmt.Errorf("tools: tool lease public key must be a PKIX Ed25519 PEM")
+	}
+	key, err := x509.ParsePKIXPublicKey(block.Bytes)
+	pub, ok := key.(ed25519.PublicKey)
+	if err != nil || !ok {
+		return nil, false, fmt.Errorf("tools: tool lease public key must be a PKIX Ed25519 PEM")
+	}
+	return auth.NewVerifier(issuer, map[string]ed25519.PublicKey{kid: pub}), strict, nil
+}
+
 func (s *server) tryMountTools(ctx context.Context, mux *http.ServeMux,
-	verifier *auth.Verifier, authorize transport.Authorize, humans humanPermissions) error {
+	verifier *auth.Verifier, authority stateTaskAuthority, humans humanPermissions) error {
+	leaseProof, strictLease, err := toolsLeaseVerifier(os.Getenv)
+	if err != nil {
+		return err
+	}
+	if leaseProof != nil && (authority.mode != authorityIdentityMode || authority.authorize == nil) {
+		return fmt.Errorf("tools: tool lease verification requires live Identity authorization")
+	}
+	authorize := authority.authorize
 	if s.iam != nil {
 		if _, ok := humans.(interface {
 			RequireHumanContainers(context.Context, auth.Claims, string) error
@@ -282,13 +322,20 @@ func (s *server) tryMountTools(ctx context.Context, mux *http.ServeMux,
 	}
 	s.registerSubjectDeletionOwner("tools", svc)
 	var handler http.Handler
+	var userAudience string
+	var humanAuthorize transport.Authorize
 	if humans != nil {
-		handler, err = toolsapi.NewHandlerWithUsers(svc, verifier, authorize,
-			toolsUserAudience(true), toolsHumanAuthorize(humans, s.logger))
-	} else {
-		// No browser identity on this front (dev-authorize stands): the human
-		// legs keep the accepted single-audience shape, verified against the
-		// plane audience, and no durable permission store is consulted.
+		userAudience = toolsUserAudience(true)
+		humanAuthorize = toolsHumanAuthorize(humans, s.logger)
+	}
+	switch {
+	case strictLease:
+		handler, err = toolsapi.NewHandlerWithToolLeasesAndUsers(ctx, svc, verifier, authorize, leaseProof, userAudience, humanAuthorize)
+	case leaseProof != nil:
+		handler, err = toolsapi.NewCoexistingHandlerWithToolLeases(ctx, svc, verifier, authorize, leaseProof, userAudience, humanAuthorize)
+	case humans != nil:
+		handler, err = toolsapi.NewHandlerWithUsers(svc, verifier, authorize, userAudience, humanAuthorize)
+	default:
 		handler, err = toolsapi.NewHandler(svc, verifier, authorize)
 	}
 	if err != nil {

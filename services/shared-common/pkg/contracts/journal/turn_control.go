@@ -52,6 +52,7 @@ type TurnControlDelta struct {
 	CancelRequested bool       `json:"cancel_requested,omitempty"`
 	PendingSteer    []Event    `json:"pending_steer,omitempty"`
 	NextTurn        *TurnLease `json:"next_turn,omitempty"`
+	ToolLeaseProof  string     `json:"tool_lease_proof,omitempty"`
 }
 
 type TurnCompleted struct {
@@ -72,6 +73,14 @@ func ScopedSessionID(scope contracts.Scope, conversationID string) string {
 	raw := scope.Tenant + "\x00" + scope.Deployment + "\x00" + scope.Subject + "\x00" + conversationID
 	sum := sha256.Sum256([]byte(raw))
 	return "vms-" + hex.EncodeToString(sum[:16])
+}
+
+// VMSessionContextID identifies the authority context shared by VM execution
+// generations for one logical session within a scope.
+func VMSessionContextID(scope contracts.Scope, sessionID string) string {
+	raw := scope.Tenant + "\x00" + scope.Deployment + "\x00" + scope.Subject + "\x00" + sessionID
+	sum := sha256.Sum256([]byte(raw))
+	return "vm-session:" + hex.EncodeToString(sum[:24])
 }
 
 func DeterministicExecutionID(scope contracts.Scope, session string, turnSeq, generation int64) string {

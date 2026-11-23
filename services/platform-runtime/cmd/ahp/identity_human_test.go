@@ -89,7 +89,7 @@ func TestSyntheticHumanFacadesHonorResourceRevocation(t *testing.T) {
 
 func TestSyntheticToolsCannotSelectLegacyHumanAuthority(t *testing.T) {
 	s := &server{iam: identity.ResourceEvaluatorFunc(func(context.Context, identity.ResourceRequest) error { return nil })}
-	err := s.tryMountTools(context.Background(), http.NewServeMux(), nil, nil, nil)
+	err := s.tryMountTools(context.Background(), http.NewServeMux(), nil, stateTaskAuthority{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "live human resource authority") {
 		t.Fatal("synthetic tools accepted legacy human authorization")
 	}

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,7 @@ import (
 	"github.com/ahp-platform/ahp/internal/statejournal"
 	"github.com/ahp-platform/ahp/internal/tools"
 	"github.com/ahp-platform/ahp/pkg/auth"
+	"github.com/ahp-platform/ahp/pkg/contracts"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -301,4 +303,165 @@ func testDelayedWorkerRequest(t *testing.T, earlyRelease, spillReceipt bool) {
 		t.Fatalf("proof validity at the Gateway clock: got %t, want %t", proofStillValid, earlyRelease)
 	}
 	t.Logf("distinct databases; Gateway floor %d; old proof within expiry: %t; delayed epoch 1 -> 409 STALE_EPOCH; durable external log: %q", floor, proofStillValid, effects)
+}
+
+func TestLeasedPrincipalCannotDowngrade(t *testing.T) {
+	e := newEnv(t)
+	worker := auth.Claims{
+		Audience: tAudience, Kind: auth.KindTask, Tenant: e.tenant, Deployment: e.deployment,
+		Subject: tSubject, Task: "worker", Root: "root", Context: "vm-session:worker", Grant: "grant",
+	}
+	for _, v := range []auth.Claims{worker, {
+		Audience: tAudience, Kind: auth.KindTask, Tenant: e.tenant, Deployment: e.deployment,
+		Subject: tSubject, Task: "worker", Root: "root", Context: "ctx", Grant: "grant", Capabilities: []string{"tools", "tools.leased"},
+	}} {
+		token, err := e.signer.Sign(v, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for route, body := range map[string]string{
+			"Call": `{"key":"downgrade","tool":"echo","arguments":{}}`,
+			"Get":  `{"key":"downgrade"}`, "GetResult": `{"key":"downgrade"}`, "Fence": `{"key":"downgrade"}`,
+		} {
+			status, out := e.call(t, route, token, body)
+			mustStatus(t, status, http.StatusForbidden, out)
+		}
+	}
+}
+
+func TestLeasedToolsAndUsers(t *testing.T) {
+	t.Run("coexisting", func(t *testing.T) { testLeasedToolsAndUsers(t, false) })
+	t.Run("strict", func(t *testing.T) { testLeasedToolsAndUsers(t, true) })
+}
+
+func testLeasedToolsAndUsers(t *testing.T, strict bool) {
+	e := newEnv(t, func(cfg *tools.Config) { cfg.UserAudience = "browser" })
+	proofSigner, err := auth.NewSigner("state", "leases", newLeaseSigningKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofVerifier := auth.NewVerifier("state", map[string]ed25519.PublicKey{"leases": proofSigner.Public()})
+	taskAuth := func(context.Context, auth.Claims, string) error { return nil }
+	humanAuth := func(_ context.Context, claims auth.Claims, capability string) error {
+		if claims.Kind != auth.KindHuman || capability != ApproveCapability {
+			return contracts.NewError(contracts.ErrForbidden, "test: approval permission required")
+		}
+		return nil
+	}
+	newHandler := NewCoexistingHandlerWithToolLeases
+	if strict {
+		newHandler = NewHandlerWithToolLeasesAndUsers
+	}
+	handler, err := newHandler(t.Context(), e.svc, e.verifier, taskAuth, proofVerifier, "browser", humanAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.srv.Config.Handler = handler
+	worker := auth.Claims{
+		Audience: tAudience, Kind: auth.KindTask, Tenant: e.tenant, Deployment: e.deployment,
+		Subject: tSubject, Task: "worker", Root: "root", Context: "vm-session:worker", Grant: "grant",
+		Capabilities: []string{"tools", "tools.leased"},
+	}
+	token, err := e.signer.Sign(worker, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	human, err := e.signer.Sign(auth.Claims{
+		Audience: "browser", Kind: auth.KindHuman, Tenant: e.tenant, Subject: tSubject,
+	}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := proofSigner.SignToolLease(worker, "worker-session", 1, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := e.signTask(t)
+	const lookup = `{"key":"tool-key"}`
+	const call = `{"key":"tool-key","tool":"echo","arguments":{}}`
+	leasedLookup := func(key string) string {
+		return fmt.Sprintf(`{"key":%q,"session_id":"worker-session","lease_epoch":1,"tool_lease_proof":%q}`, key, proof)
+	}
+	leasedCall := func(key, tool string) string {
+		return fmt.Sprintf(`{"key":%q,"tool":%q,"arguments":{},"session_id":"worker-session","lease_epoch":1,"tool_lease_proof":%q}`, key, tool, proof)
+	}
+	expect := func(route, bearer, input string, want int) map[string]any {
+		t.Helper()
+		status, out := e.call(t, route, bearer, input)
+		mustStatus(t, status, want, out)
+		return out
+	}
+	expect("Call", token, call, 403)
+	expect("Call", human, call, 403)
+	expect("Call", token, leasedCall("tool-key", "echo"), 200)
+	expect("FenceAndLookup", token, leasedLookup("tool-key"), 200)
+	expect("FenceAndLookup", legacy, lookup, 403)
+	expect("FenceAndLookup", legacy, leasedLookup("tool-key"), 403)
+	expect("ConnectionState", token, "{}", 200)
+	expect("Approvals", human, "{}", 200)
+	expect("Approvals", token, "{}", 403)
+	expect("OAuthConnections", human, "{}", 403)
+	if strict {
+		expect("Call", legacy, call, 403)
+		for _, route := range []string{"Get", "GetResult", "Fence"} {
+			expect(route, token, lookup, 404)
+			expect(route, legacy, lookup, 404)
+		}
+	} else {
+		expect("Call", legacy, call, 200)
+		expect("Get", legacy, lookup, 200)
+		expect("GetResult", legacy, lookup, 200)
+		for _, route := range []string{"Get", "GetResult", "Fence"} {
+			expect(route, token, lookup, 403)
+		}
+		internalKey := fmt.Sprintf("leased:%x", sha256.Sum256([]byte("worker-session\x00tool-key")))
+		internalLookup := fmt.Sprintf(`{"key":%q}`, internalKey)
+		expect("Get", legacy, internalLookup, 403)
+		expect("Fence", legacy, internalLookup, 403)
+	}
+
+	for _, decision := range []string{"Approve", "Decline"} {
+		input := leasedCall("human-"+decision, "gated")
+		if reason := expect("Call", token, input, 409)["reason"]; reason != "APPROVAL_REQUIRED" {
+			t.Fatalf("expected approval prerequisite, got %v", reason)
+		}
+		pending := worklist(t, e, human)
+		if len(pending) != 1 {
+			t.Fatalf("want one approval, got %v", pending)
+		}
+		row := pending[0].(map[string]any)
+		sign := fmt.Sprintf(`{"request_id":%q,"digest":%q,"tool":"gated"}`, row["request_id"], row["digest"])
+		expect(decision, token, sign, 403)
+		expect(decision, human, sign, 200)
+		if decision == "Approve" {
+			expect("Call", token, input, 200)
+			expect("FenceAndLookup", token, leasedLookup("human-"+decision), 200)
+		} else if reason := expect("Call", token, input, 409)["reason"]; reason != "APPROVAL_DECLINED" {
+			t.Fatalf("expected refusal, got %v", reason)
+		}
+	}
+
+	if reason := expect("Call", token, leasedCall("policy", "write"), 403)["reason"]; reason != "POLICY_DENIED" {
+		t.Fatalf("expected policy refusal, got %v", reason)
+	}
+	e.allowDigest(t, "business", json.RawMessage(`{}`))
+	expect("Call", token, leasedCall("business", "business"), 200)
+	out := expect("FenceAndLookup", token, leasedLookup("business"), 200)
+	receipt, _ := out["receipt"].(map[string]any)
+	payload, _ := receipt["payload"].(map[string]any)
+	if out["status"] != "COMPLETED" || receipt["status"] != "SUCCEEDED" || payload["isError"] != true {
+		t.Fatalf("business error should be a known tool outcome: %v", out)
+	}
+	if n := atomic.LoadInt32(&e.fixture.effCount); n != 1 {
+		t.Fatalf("expected only the business tool to reach the side-effecting MCP fixture, calls=%d", n)
+	}
+}
+
+func newLeaseSigningKey(t *testing.T) ed25519.PrivateKey {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
 }

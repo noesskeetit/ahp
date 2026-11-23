@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import https from 'node:https';
 import test from 'node:test';
-import {CompactJournalClient, JournalHTTPError} from '../src/index.mjs';
+import {CompactJournalClient, JournalHTTPError, VMLease} from '../src/index.mjs';
 import {isTurnControl} from '../src/turn-control.mjs';
 
 test('the HTTPS transport accepts 204 and empty 200 responses', async t => {
@@ -100,4 +100,27 @@ test('native journal readers skip canonical turn control and SDK completion rows
     {...output, type: 'native'},
     {...completed, role: 'system'},
   ]) assert.equal(isTurnControl(row), false, row.type);
+});
+
+
+test('VM lease tracks warm proof and filters stale or foreign heartbeat control', () => {
+  const claim = {session_id: 's', worker: 'vm', epoch: 1, input_seq: 3,
+    expires_at: '2026-11-19T00:00:30Z', tool_lease_proof: 'claim'};
+  const lease = new VMLease(claim);
+  const control = {turn_seq: 5, next_turn: {...claim, input_seq: 5, expires_at: '2026-11-19T00:01:00.000002Z'},
+    tool_lease_proof: 'finish'};
+  assert.equal(lease.applyFinish(3, {control}), true);
+  assert.equal(lease.current.tool_lease_proof, 'finish');
+  const late = {...claim, expires_at: '2026-11-19T00:01:00.000001Z', tool_lease_proof: 'stale',
+    control: {turn_seq: 3, cancel_requested: true}};
+  assert.equal(lease.applyHeartbeat(late), undefined);
+  assert.equal(lease.current.tool_lease_proof, 'finish');
+  late.expires_at = '2026-11-19T03:01:00.000003+03:00';
+  late.tool_lease_proof = 'heartbeat';
+  assert.equal(lease.applyHeartbeat(late), undefined);
+  assert.equal(lease.current.tool_lease_proof, 'heartbeat');
+  late.control.turn_seq = 5;
+  assert.deepEqual(lease.applyHeartbeat(late), late.control);
+  assert.equal(lease.applyFinish(3, {control}), false);
+  assert.equal(lease.current.input_seq, 5);
 });

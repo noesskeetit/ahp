@@ -236,3 +236,31 @@ def test_sync_client_maintains_lease_and_sync_list_batches_tuples():
     assert [row.metadata for row in saver.list(config, limit=1)] == [{"step": 1}]
     assert [call[0] for call in transport.calls] == ["GET"]
     sync.release()
+
+
+async def test_vm_finish_and_heartbeat_keep_the_proof_for_the_latest_deadline():
+    class ProofTransport(JournalTransport):
+        async def request_state(self, method, path, *, params=None, body=None):
+            if path.endswith("/vm:claim"):
+                return {"epoch": 1, "worker": "vm", "input_seq": 5,
+                        "expires_at": "2026-11-19T00:00:30Z", "tool_lease_proof": "claim"}
+            if path.endswith(":heartbeat"):
+                return self.renewed
+            return await super().request_state(method, path, params=params, body=body)
+
+    transport = ProofTransport()
+    client = AHPJournalClient(transport, "session", harness_type="langgraph")
+    await client.claim_vm_turn(turn_seq=5, generation=1, execution_id="vm")
+    assert client.tool_lease_proof == "claim"
+    transport.control = {"turn_seq": 7, "tool_lease_proof": "finish", "next_turn": {
+        "epoch": 1, "worker": "vm", "input_seq": 7, "expires_at": "2026-11-19T00:01:00Z"}}
+    await client.append("finish", 6, [], finish_turn="IDLE")
+    assert client.tool_lease_proof == "finish"
+    transport.renewed = {"epoch": 1, "worker": "vm", "expires_at": "2026-11-19T00:00:59Z",
+                         "tool_lease_proof": "old", "control": {"turn_seq": 5, "cancel_requested": True}}
+    assert "control" not in await client.heartbeat()
+    assert client.tool_lease_proof == "finish"
+    transport.renewed = {**transport.renewed, "expires_at": "2026-11-19T00:01:00.000001Z",
+                         "tool_lease_proof": "heartbeat"}
+    assert "control" not in await client.heartbeat()
+    assert client.turn_seq == 7 and client.tool_lease_proof == "heartbeat"

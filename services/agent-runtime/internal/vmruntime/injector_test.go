@@ -224,16 +224,34 @@ func TestInjectorRejectsUnscopedRoutesAndSelectorsLocally(t *testing.T) {
 }
 
 func TestInjectorCloseCancelsInFlightStateRequest(t *testing.T) {
+	testInjectorCloseCancelsInFlightRequest(t, "/v1/state/sessions/session%2Falpha", "", false)
+}
+
+func TestInjectorCloseCancelsInFlightToolRequest(t *testing.T) {
+	testInjectorCloseCancelsInFlightRequest(t, "/v1/tools/FenceAndLookup", injectorTestToolLease, true)
+}
+
+func testInjectorCloseCancelsInFlightRequest(t *testing.T, path, body string, tools bool) {
+	t.Helper()
 	guest := injectorTestGuest()
 	socket := injectorTestSocket(t)
 	entered, stopped := make(chan struct{}), make(chan struct{})
+	release := make(chan struct{})
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			t.Errorf("could not read upstream request body: %v", err)
+			return
+		}
 		close(entered)
-		<-r.Context().Done()
-		close(stopped)
+		select {
+		case <-r.Context().Done():
+			close(stopped)
+		case <-release:
+		}
 	}))
 	defer upstream.Close()
-	i, err := NewInjector(InjectorConfig{
+	defer close(release)
+	config := InjectorConfig{
 		StateURL: upstream.URL,
 		ClientFor: func(context.Context, contracts.Scope) (*http.Client, error) {
 			return upstream.Client(), nil
@@ -241,7 +259,12 @@ func TestInjectorCloseCancelsInFlightStateRequest(t *testing.T) {
 		MintToken: func(context.Context, Execution) (string, error) {
 			return injectorTestJWT(time.Now().Add(5 * time.Minute)), nil
 		},
-	})
+	}
+	if tools {
+		config.ToolsURL = upstream.URL
+		config.ToolsClientFor = config.ClientFor
+	}
+	i, err := NewInjector(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +276,13 @@ func TestInjectorCloseCancelsInFlightStateRequest(t *testing.T) {
 	defer client.CloseIdleConnections()
 	guestDone := make(chan error, 1)
 	go func() {
-		resp, err := client.Get("http://guest/v1/state/sessions/session%2Falpha")
+		var resp *http.Response
+		var err error
+		if tools {
+			resp, err = client.Post("http://guest"+path, "application/json", strings.NewReader(body))
+		} else {
+			resp, err = client.Get("http://guest" + path)
+		}
 		if resp != nil {
 			resp.Body.Close()
 		}

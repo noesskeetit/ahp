@@ -245,7 +245,19 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 				break
 			}
 		}
-		return store.AppendEvents(r.Context(), caller.Scope, r.PathValue("session"), authorizedLease(caller, req.Epoch), shared, req.AppendRequest)
+		session := r.PathValue("session")
+		receipt, err := store.AppendEvents(r.Context(), caller.Scope, session, authorizedLease(caller, req.Epoch), shared, req.AppendRequest)
+		if err != nil || receipt.Control == nil || receipt.Control.NextTurn == nil || signer == nil {
+			return receipt, err
+		}
+		// The committed receipt is durable, and its proof is issued only on
+		// this authenticated response. A lost response can replay the finish.
+		proof, err := leaseProof(caller, session, receipt.Control.NextTurn.Lease)
+		if err != nil {
+			return nil, contracts.NewError(contracts.ErrUnavailable, "could not sign the committed VM lease")
+		}
+		receipt.Control.ToolLeaseProof = proof
+		return receipt, nil
 	}))
 	mux.HandleFunc("GET /v1/state/sessions/{session}/events", readRoute(func(r *http.Request, caller transport.Principal) (any, error) {
 		return readSessionEvents(r, caller, store, authorize, caller.Scope, false)

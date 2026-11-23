@@ -132,7 +132,7 @@ export class CompactJournalClient {
     });
   }
 
-  startHeartbeat(id, epoch, {ttlMs = 30000, intervalMs = ttlMs / 3, controller = new AbortController(), onControl} = {}) {
+  startHeartbeat(id, epoch, {ttlMs = 30000, intervalMs = ttlMs / 3, controller = new AbortController(), onControl, vmLease} = {}) {
     if (!Number.isFinite(intervalMs) || intervalMs < 1 || intervalMs >= ttlMs) {
       throw new RangeError('Heartbeat interval must be positive and shorter than the lease TTL');
     }
@@ -148,7 +148,10 @@ export class CompactJournalClient {
         try {
           await delay(intervalMs, undefined, {signal});
           const receipt = await this.heartbeatLease(id, epoch, {ttlMs, signal});
-          if (receipt?.control && !signal.aborted) await onControl?.(receipt.control);
+          if (!signal.aborted) {
+            const control = vmLease ? vmLease.applyHeartbeat(receipt) : receipt?.control;
+            if (control) await onControl?.(control);
+          }
           error = undefined;
         } catch (failure) {
           if (signal.aborted) return;

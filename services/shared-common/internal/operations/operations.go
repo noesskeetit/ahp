@@ -729,6 +729,12 @@ func sameJSON(a, b json.RawMessage) bool {
 	return da == db
 }
 
+// RequestFingerprint returns the canonical ledger identity of a request.
+// Owners use it to verify sealed records before returning an idempotent replay.
+func RequestFingerprint(req Request) (string, error) {
+	return fingerprint(req)
+}
+
 // fingerprint is the canonical digest over the request fields that define
 // the intended effect. Two Accepts share a key legally only when their
 // fingerprints match.

@@ -164,3 +164,75 @@ func TestVMCancellationClosesUnappliedControl(t *testing.T) {
 		t.Fatalf("unapplied input has no terminal disposition: %+v %v", ended, err)
 	}
 }
+
+func TestVMToolIntentDurableKeyAndSettlement(t *testing.T) {
+	ctx, _, store := journalTestStore(t)
+	scope, req := newVMAdmission(t)
+	admitted, err := store.EnqueueTurn(ctx, scope, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := journal.VMTurnClaimRequest{TurnSeq: admitted.HeadSeq, Generation: 1,
+		ExecutionID: journal.DeterministicExecutionID(scope, req.SessionID, admitted.HeadSeq, 1)}
+	turn, err := store.ClaimVMTurn(ctx, scope, req.SessionID, claim, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := PreparedIntent{CallID: "auth", IdempotencyKey: "auth-key", ToolName: "mcp.write", ArgsDigest: SHA256Digest{1}}
+	approval := PreparedIntent{CallID: "approval", IdempotencyKey: "approval-key", ToolName: "mcp.write", ArgsDigest: SHA256Digest{2}}
+	prepare, err := store.AppendEvents(ctx, scope, req.SessionID, turn.Lease, false, AppendRequest{
+		TurnSeq: turn.InputSeq, ExpectedSeq: turn.HeadSeq, Key: "prepare-tools", Intents: []PreparedIntent{auth, approval},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := store.GetToolIntent(ctx, scope, req.SessionID, auth.CallID)
+	if err != nil || row.IdempotencyKey != auth.IdempotencyKey || row.Status != "PREPARED" {
+		t.Fatalf("prepared identity: %+v, %v", row, err)
+	}
+	dispatch := IntentTransition{TurnSeq: turn.InputSeq, CallID: auth.CallID, GatewayOperationID: "wrong", Status: IntentDispatched}
+	if err := store.MutateToolIntent(ctx, scope, req.SessionID, turn.Lease, dispatch); contracts.Code(err) != contracts.ErrKeyReuse {
+		t.Fatalf("first dispatch accepted a mismatched key: %v", err)
+	}
+	commit := func(head int64, key string, outcomes ...IntentTransition) (AppendReceipt, error) {
+		return store.AppendEvents(ctx, scope, req.SessionID, turn.Lease, false, AppendRequest{
+			TurnSeq: turn.InputSeq, ExpectedSeq: head, Key: key, ToolOutcomes: outcomes,
+			Events: []EventInput{{ID: key, Type: "tool.result", Role: "tool", Codec: "json", Payload: Payload{Inline: []byte(`{}`)}}},
+		})
+	}
+	authWait := IntentTransition{CallID: auth.CallID, GatewayOperationID: "wrong", Status: "AWAITING_AUTH"}
+	approvalWait := IntentTransition{CallID: approval.CallID, GatewayOperationID: approval.IdempotencyKey, Status: "AWAITING_APPROVAL"}
+	if _, err := commit(prepare.HeadSeq, "wait-tools", authWait, approvalWait); contracts.Code(err) != contracts.ErrKeyReuse {
+		t.Fatalf("invalid key did not roll back the journal write: %v", err)
+	}
+	authWait.GatewayOperationID = auth.IdempotencyKey
+	waited, err := commit(prepare.HeadSeq, "wait-tools", authWait, approvalWait)
+	if err != nil || waited.HeadSeq != prepare.HeadSeq+1 {
+		t.Fatalf("durable wait and event: %+v, %v", waited, err)
+	}
+	view, err := store.InspectSession(ctx, scope, req.SessionID)
+	if err != nil || len(view.Unresolved) != 2 || view.Unresolved[0].Status != "AWAITING_APPROVAL" ||
+		view.Unresolved[1].Status != "AWAITING_AUTH" || view.Unresolved[1].IdempotencyKey != auth.IdempotencyKey {
+		t.Fatalf("unresolved intents: %+v, %v", view.Unresolved, err)
+	}
+	dispatch.GatewayOperationID = auth.IdempotencyKey
+	if err := store.MutateToolIntent(ctx, scope, req.SessionID, turn.Lease, dispatch); err != nil {
+		t.Fatalf("resume authenticated intent: %v", err)
+	}
+	completed := IntentTransition{CallID: auth.CallID, GatewayOperationID: auth.IdempotencyKey, Status: IntentCompleted,
+		Result: &Payload{Inline: []byte(`{"isError":true}`)}}
+	refused := IntentTransition{CallID: approval.CallID, GatewayOperationID: approval.IdempotencyKey, Status: "REFUSED",
+		Result: &Payload{Inline: []byte(`{"reason":"APPROVAL_DECLINED","tool":"mcp.write"}`)}}
+	settled, err := commit(waited.HeadSeq, "settled-tools", completed, refused)
+	if err != nil || settled.HeadSeq != waited.HeadSeq+1 {
+		t.Fatalf("durable terminal outcomes and event: %+v, %v", settled, err)
+	}
+	view, err = store.InspectSession(ctx, scope, req.SessionID)
+	if err != nil || len(view.Unresolved) != 0 {
+		t.Fatalf("terminal outcomes remained unresolved: %+v, %v", view.Unresolved, err)
+	}
+	row, err = store.GetToolIntent(ctx, scope, req.SessionID, approval.CallID)
+	if err != nil || row.Status != "REFUSED" || row.Result == nil || string(row.Result.Inline) != string(refused.Result.Inline) {
+		t.Fatalf("terminal refusal: %+v, %v", row, err)
+	}
+}

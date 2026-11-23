@@ -6,6 +6,7 @@ import asyncio
 import base64
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import wraps
 import json
 from urllib.parse import quote
@@ -24,6 +25,15 @@ def _receipt_for_turn(receipt, turn_seq):
     if control is None or control.get("turn_seq", turn_seq) == turn_seq:
         return receipt
     return {key: value for key, value in receipt.items() if key != "control"}
+
+
+def _deadline(value):
+    expires = value.get("expires_at")
+    return datetime.fromisoformat(expires.replace("Z", "+00:00")) if expires else None
+
+
+def _lease_owner(value):
+    return value["epoch"], value.get("worker")
 
 
 @dataclass
@@ -63,6 +73,13 @@ class AHPJournalClient:
     def turn_seq(self):
         """The current VM-managed turn, or None for an unbound or pull lease."""
         return self._lease.turn_seq
+
+    @property
+    def tool_lease_proof(self):
+        """Proof for the current lease, when the State API issues one."""
+        if self.fenced:
+            return None
+        return (self._lease.value or {}).get("tool_lease_proof")
 
     def _check_can_acquire(self):
         if self._lease.value is not None or self.fenced:
@@ -167,10 +184,21 @@ class AHPJournalClient:
         return await self._client.request_state("PATCH", self.path + "/legal-hold", body={"held": held})
 
     async def heartbeat(self, ttl_ms=30000):
-        current = self._lease.value
+        started = self._lease.value
         updated = await self._mutate(":heartbeat", {"ttl_ms": ttl_ms})
-        if self._lease.value is not current or self.fenced:
+        current = self._lease.value
+        same_vm = (self.turn_seq is not None and current is not None and
+                   _lease_owner(current) == _lease_owner(started))
+        if self.fenced or (current is not started and not same_vm):
             raise SessionFencedError("STALE_EPOCH", "lease changed while heartbeat was in flight")
+        if same_vm:
+            if _lease_owner(updated) != _lease_owner(current):
+                raise SessionFencedError("STALE_EPOCH", "heartbeat returned another lease owner")
+            old_deadline, renewed = _deadline(current), _deadline(updated)
+            if old_deadline is not None and renewed is not None and renewed < old_deadline:
+                return {key: value for key, value in current.items() if key != "control"}
+            if old_deadline == renewed and "tool_lease_proof" in current and "tool_lease_proof" not in updated:
+                updated = {**updated, "tool_lease_proof": current["tool_lease_proof"]}
         return self._set_lease(_receipt_for_turn(updated, self.turn_seq))
 
     async def release(self, *, status="IDLE"):
@@ -247,9 +275,23 @@ class AHPJournalClient:
                 receipt_turn = next_turn["input_seq"]
                 if control.get("turn_seq", receipt_turn) != receipt_turn:
                     raise StateValidationError("INVALID_ARGUMENT", "followup receipt identifies conflicting turns")
+                current = self._lease.value
+                updated = {**current, **next_turn}
+                if _lease_owner(updated) != _lease_owner(current):
+                    raise StateValidationError("INVALID_ARGUMENT", "followup receipt identifies another lease owner")
                 if self._lease.guard is not None:
                     self._lease.guard.fenced = True
                     self._lease.guard = None
+                updated.pop("control", None)
+                old_deadline, next_deadline = _deadline(current), _deadline(next_turn)
+                proof = control.get("tool_lease_proof")
+                if old_deadline is not None and next_deadline is not None and old_deadline > next_deadline:
+                    updated["expires_at"] = current["expires_at"]
+                elif proof:
+                    updated["tool_lease_proof"] = proof
+                elif old_deadline != next_deadline:
+                    updated.pop("tool_lease_proof", None)
+                self._lease.value = updated
                 self._lease.turn_seq = receipt_turn
         return _receipt_for_turn(result, receipt_turn)
 
@@ -398,6 +440,10 @@ class SyncAHPJournalClient:
     @property
     def turn_seq(self):
         return self._journal.turn_seq
+
+    @property
+    def tool_lease_proof(self):
+        return self._journal.tool_lease_proof
 
     acquire = _sync(AHPJournalClient.acquire)
     enqueue_turn = _sync(AHPJournalClient.enqueue_turn)

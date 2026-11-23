@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,6 +180,21 @@ func TestDotsFIFOHTTPVerifiedTask(t *testing.T) {
 		}
 	})
 	t.Run("VM-managed turn through the Go SDK", func(t *testing.T) {
-		testVMManagedTurnSDK(t, httpPlain, scope, token)
+		testVMManagedTurnSDK(t, httpPlain, nil, scope, token, pool, verifier, proofVerifier)
+	})
+	t.Run("VM-managed finish safely replays after a signing error", func(t *testing.T) {
+		_, proofKey, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		oversized, err := auth.NewSigner(strings.Repeat("issuer", 4096), "test", proofKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		badProofHandler, err := NewHTTPWithToolLeases(store, verifier, ids.Authorize, oversized)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testVMManagedTurnSDK(t, httpPlain, start(badProofHandler), scope, token, pool, verifier, proofVerifier)
 	})
 }

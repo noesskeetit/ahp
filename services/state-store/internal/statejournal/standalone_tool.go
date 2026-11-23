@@ -57,15 +57,16 @@ func (s *Store) BeginStandaloneTool(ctx context.Context, scope contracts.Scope, 
 			return contracts.NewError(contracts.ErrKeyReuse, "tool arguments do not match the prepared intent")
 		}
 		switch decision.Status {
-		case IntentCompleted:
+		case IntentCompleted, IntentRefused:
 			decision.Result = &response
 			return nil
 		case IntentUnknown:
 			return nil
+		case IntentAwaitingApproval, IntentAwaitingAuth:
+			return contracts.NewError(contracts.ErrConflict, "tool intent requires Gateway settlement")
 		}
 		if decision.GatewayOperationID == "" {
-			hash := sha256.Sum256([]byte(request.CallID))
-			decision.GatewayOperationID = "standalone-" + hex.EncodeToString(hash[:])
+			decision.GatewayOperationID = standaloneOperationID(request.CallID)
 		}
 		current := epoch != nil && *epoch == lease.Epoch
 		if request.AckLost || !current {
@@ -85,4 +86,9 @@ func (s *Store) BeginStandaloneTool(ctx context.Context, scope contracts.Scope, 
 		return StandaloneToolDecision{}, err
 	}
 	return decision, nil
+}
+
+func standaloneOperationID(callID string) string {
+	hash := sha256.Sum256([]byte(callID))
+	return "standalone-" + hex.EncodeToString(hash[:])
 }

@@ -65,7 +65,7 @@ func (s *Service) DeleteSubject(ctx context.Context, tenant, subject string) err
 				return err
 			}
 		}
-		return nil
+		return s.deleteToolLeaseRows(ctx, tx, tenant, subject)
 	})
 }
 

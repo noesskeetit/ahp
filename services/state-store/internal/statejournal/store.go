@@ -136,7 +136,9 @@ func (s *Store) HeartbeatLease(ctx context.Context, scope contracts.Scope, sessi
 	}
 	err := s.pool.QueryRow(ctx, `
 		UPDATE ahp_journal.sessions
-		SET lease_expires_at=clock_timestamp()+$7*interval '1 microsecond'
+		SET lease_expires_at=CASE WHEN execution_mode='vm_managed'
+			THEN greatest(lease_expires_at,clock_timestamp()+$7*interval '1 microsecond')
+			ELSE clock_timestamp()+$7*interval '1 microsecond' END
 		WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4
 		  AND lease_owner=$5 AND lease_epoch=$6 AND lease_expires_at > clock_timestamp()
 		  AND status <> 'DELETED'
@@ -236,8 +238,8 @@ func lockSessionState(ctx context.Context, tx pgx.Tx, scope contracts.Scope, ses
 		)
 		SELECT head_seq, coalesce(
 		    lease_epoch=$5 AND lease_owner=$6 AND lease_expires_at > clock_timestamp(), false
-		), execution_mode, turn_seq, steer_acked_seq, followup_count, cancel_requested FROM locked`,
-		scope.Tenant, session, scope.Deployment, scope.Subject, lease.Epoch, lease.Worker).Scan(&head, &valid, &turn.Mode, &turn.Seq, &turn.Ack, &turn.Followups, &turn.Cancel)
+		), execution_mode, turn_seq, steer_acked_seq, followup_count, cancel_requested, lease_expires_at FROM locked`,
+		scope.Tenant, session, scope.Deployment, scope.Subject, lease.Epoch, lease.Worker).Scan(&head, &valid, &turn.Mode, &turn.Seq, &turn.Ack, &turn.Followups, &turn.Cancel, &turn.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, turn, contracts.NewError(contracts.ErrNotFound, "session not found")
 	}

@@ -324,8 +324,13 @@ func stateHandler(store *statejournal.Store, verifier *auth.Verifier, authorize 
 		coordinatorWorkloads = strings.Split(env("AHP_STATE_COORDINATOR_WORKLOAD_IDS"), ",")
 	}
 	file := env("AHP_STATE_TOOL_LEASE_KEY")
-	if file == "" {
+	issuer := env("AHP_STATE_TOOL_LEASE_ISSUER")
+	kid := env("AHP_STATE_TOOL_LEASE_KID")
+	if file == "" && issuer == "" && kid == "" {
 		return statejournal.NewHTTPWithCoordinator(store, verifier, authorize, nil, coordinatorWorkloads)
+	}
+	if file == "" || issuer == "" || kid == "" {
+		return nil, errors.New("State Tool Gateway proof requires key, issuer and kid")
 	}
 	raw, err := readPEM(file, "PRIVATE KEY")
 	if err != nil {
@@ -336,7 +341,7 @@ func stateHandler(store *statejournal.Store, verifier *auth.Verifier, authorize 
 	if err != nil || !ok {
 		return nil, errors.New("tool lease key must be Ed25519")
 	}
-	signer, err := auth.NewSigner(env("AHP_STATE_TOOL_LEASE_ISSUER"), env("AHP_STATE_TOOL_LEASE_KID"), private)
+	signer, err := auth.NewSigner(issuer, kid, private)
 	if err != nil {
 		return nil, err
 	}

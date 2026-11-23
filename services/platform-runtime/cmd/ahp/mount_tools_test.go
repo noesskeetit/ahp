@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -38,7 +39,7 @@ func TestTryMountToolsFailsClosedWithoutConfig(t *testing.T) {
 	s := &server{logger: slog.New(slog.NewJSONHandler(&buf, nil))}
 	mux := http.NewServeMux()
 	verifier := auth.NewVerifier("iss", map[string]ed25519.PublicKey{"k1": mustPub(t)})
-	if err := s.tryMountTools(context.Background(), mux, verifier, mountPermissive(), nil); err == nil {
+	if err := s.tryMountTools(context.Background(), mux, verifier, permissiveDevAuthority(nil), nil); err == nil {
 		t.Fatal("expected fail-closed when AHP_TOOLS_CONFIG is empty")
 	}
 	// No handler was registered, so the mux itself answers 404.
@@ -92,7 +93,7 @@ func TestTryMountToolsMountsAndRoundTrips(t *testing.T) {
 	}
 	verifier := auth.NewVerifier("iss", map[string]ed25519.PublicKey{"k1": pub})
 
-	if err := s.tryMountTools(ctx, mux, verifier, mountPermissive(), nil); err != nil {
+	if err := s.tryMountTools(ctx, mux, verifier, permissiveDevAuthority(nil), nil); err != nil {
 		t.Fatalf("tryMountTools: %v", err)
 	}
 	if !strings.Contains(logBuf.String(), "tools plane mounted prefix=/v1/tools/") {
@@ -231,4 +232,41 @@ func startLoopbackMCP(t *testing.T) string {
 	ts := httptest.NewServer(handler) // loopback only
 	t.Cleanup(ts.Close)
 	return ts.URL
+}
+
+func TestTryMountToolsRejectsUnsafeLeaseSettingsAtStartup(t *testing.T) {
+	key, err := x509.MarshalPKIXPublicKey(mustPub(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	validKey := filepath.Join(t.TempDir(), "public.pem")
+	if err := os.WriteFile(validKey, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: key}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	invalidKey := filepath.Join(t.TempDir(), "invalid.pem")
+	if err := os.WriteFile(invalidKey, []byte("invalid PEM"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, issuer, kid, path, required, want string
+	}{
+		{"partial", "state", "", "", "", "requires issuer, kid and public key"},
+		{"required-without-proof-verifier", "", "", "", "1", "requires issuer, kid and public key"},
+		{"unreadable", "state", "proof", filepath.Join(t.TempDir(), "missing"), "", "read the tool lease public key"},
+		{"malformed", "state", "proof", invalidKey, "", "PKIX Ed25519 PEM"},
+		{"dev-mode", "state", "proof", validKey, "", "live Identity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AHP_TOOLS_LEASE_ISSUER", tc.issuer)
+			t.Setenv("AHP_TOOLS_LEASE_KID", tc.kid)
+			t.Setenv("AHP_TOOLS_LEASE_PUBLIC_KEY", tc.path)
+			t.Setenv("AHP_TOOLS_LEASE_REQUIRED", tc.required)
+			t.Setenv("AHP_TOOLS_CONFIG", "")
+			s := &server{}
+			err := s.tryMountTools(t.Context(), http.NewServeMux(), nil, permissiveDevAuthority(nil), nil)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("unsafe lease settings error = %v, want %q", err, tc.want)
+			}
+		})
+	}
 }

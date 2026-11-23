@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/ahp-platform/ahp/internal/artifacts"
@@ -88,12 +89,25 @@ func (s *Service) takeToolEpoch(ctx context.Context, tx pgx.Tx, scope contracts.
 	return s.advanceToolEpoch(ctx, tx, scope, lease)
 }
 
+const leasedOperationPrefix = "leased:"
+
+// IsLeasedOperationKey identifies the reserved ledger namespace for internal
+// leased keys. The public key on a leased request is hashed into this space.
+func IsLeasedOperationKey(key string) bool {
+	suffix, ok := strings.CutPrefix(key, leasedOperationPrefix)
+	if !ok || len(suffix) != sha256.Size*2 || suffix != strings.ToLower(suffix) {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
+}
+
 func leasedOperationKey(lease ToolLease, key string) (string, error) {
 	if key == "" || len(key) > 128 || lease.SessionID == "" || lease.ContextID == "" || lease.Epoch <= 0 {
 		return "", contracts.NewError(contracts.ErrInvalid, "tools: invalid leased operation")
 	}
 	digest := sha256.Sum256([]byte(lease.SessionID + "\x00" + key))
-	return "leased:" + hex.EncodeToString(digest[:]), nil
+	return leasedOperationPrefix + hex.EncodeToString(digest[:]), nil
 }
 
 // CallWithToolLease and FenceAndLookup share the Gateway's admission lock.
@@ -130,15 +144,31 @@ func (s *Service) CallWithToolLease(ctx context.Context, scope contracts.Scope, 
 		if err := s.advanceToolEpoch(ctx, tx, scope, lease); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `
+		tag, err := tx.Exec(ctx, `
 			INSERT INTO `+s.schema+`.gateway_operations AS current
 				(tenant_id, session_id, operation_key, created_epoch, request_digest, status)
 			VALUES ($1,$2,$3,$4,$5,'IN_FLIGHT')
 			ON CONFLICT (tenant_id, session_id, operation_key) DO UPDATE SET
 				created_epoch=EXCLUDED.created_epoch, request_digest=EXCLUDED.request_digest,
 				status='IN_FLIGHT', updated_at=clock_timestamp()
-			WHERE current.status='FENCED_ABORTED'`, scope.Tenant, lease.SessionID, key, lease.Epoch, digest)
-		return err
+			WHERE current.status='FENCED_ABORTED'
+			  AND (current.request_digest IS NULL OR current.request_digest=EXCLUDED.request_digest)`,
+			scope.Tenant, lease.SessionID, key, lease.Epoch, digest)
+		if err != nil || tag.RowsAffected() == 1 {
+			return err
+		}
+		var recorded string
+		err = tx.QueryRow(ctx, `
+			SELECT request_digest FROM `+s.schema+`.gateway_operations
+			WHERE tenant_id=$1 AND session_id=$2 AND operation_key=$3`,
+			scope.Tenant, lease.SessionID, key).Scan(&recorded)
+		if err != nil {
+			return err
+		}
+		if recorded != digest {
+			return contracts.NewError(contracts.ErrKeyReuse, "tools: operation key was used with a different request")
+		}
+		return nil
 	}
 	op, err := s.call(ctx, scope, internalKey, tool, args, prov, check,
 		artifacts.Binding{ContextID: lease.SessionID, TaskID: prov.TaskID})
@@ -204,4 +234,20 @@ func (s *Service) FenceAndLookup(ctx context.Context, scope contracts.Scope, key
 		// to repeat unless reconciled by the owner of the external operation.
 		return FencedResult{Status: "OUTCOME_UNKNOWN"}, nil
 	}
+}
+
+func (s *Service) deleteToolLeaseRows(ctx context.Context, tx pgx.Tx, tenant, subject string) error {
+	var exists bool
+	if err := tx.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", s.schema+".gateway_session_epochs").Scan(&exists); err != nil || !exists {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM `+s.schema+`.gateway_operations op USING `+s.schema+`.gateway_session_epochs ep
+		WHERE op.tenant_id=ep.tenant_id AND op.session_id=ep.session_id
+		  AND ep.tenant_id=$1 AND ($2='' OR ep.subject_id=$2)`, tenant, subject); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+		DELETE FROM `+s.schema+`.gateway_session_epochs WHERE tenant_id=$1 AND ($2='' OR subject_id=$2)`, tenant, subject)
+	return err
 }

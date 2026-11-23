@@ -2,6 +2,9 @@ package tools
 
 import (
 	"context"
+	"time"
+
+	"github.com/ahp-platform/ahp/internal/operations"
 	"github.com/ahp-platform/ahp/pkg/contracts"
 	"testing"
 )
@@ -58,4 +61,70 @@ func TestSubjectDeletionToolsCannotRecreateErasedApproverOnForeignRequest(t *tes
 	if ok, err := e.svc.HasApproval(ctx, other, "assigned", digest, "echo"); err != nil || ok {
 		t.Fatalf("foreign approval changed: %v %v", ok, err)
 	}
+}
+
+func TestToolLeaseErasureRetainsPendingAndOtherOwnerRows(t *testing.T) {
+	e, ctx := newTestService(t)
+	if err := e.svc.MigrateToolLeases(ctx); err != nil {
+		t.Fatal(err)
+	}
+	localSubject := e.scope
+	localSubject.Subject += "-other"
+	foreign := e.scope
+	foreign.Tenant += "-other"
+	target := ToolLease{SessionID: "target", ContextID: "target-context", Epoch: 1, ExpiresAt: time.Now().Add(time.Minute)}
+	for i, peer := range []contracts.Scope{localSubject, foreign} {
+		lease := target
+		if i == 0 {
+			lease.SessionID = "other-subject"
+		}
+		if _, err := e.svc.FenceAndLookup(ctx, peer, "effect", lease); err != nil {
+			t.Fatal(err)
+		}
+	}
+	args := []byte(`{"target":"ambiguous"}`)
+	digest, err := ApprovalDigest("errwrite", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.g.AllowDigest(digest)
+	op, err := e.svc.CallWithToolLease(ctx, e.scope, "effect", "errwrite", args,
+		CallProvenance{TaskID: "worker", ContextID: target.ContextID}, target)
+	if err == nil || op.Status != operations.StatusSideEffectUnknown {
+		t.Fatalf("expected pending external effect: %v, %v", op, err)
+	}
+
+	assertRows := func(tenant string, want int) {
+		t.Helper()
+		for _, table := range []string{"gateway_operations", "gateway_session_epochs"} {
+			var rows int
+			if err := e.svc.pool.QueryRow(ctx, "SELECT count(*) FROM "+e.schema+"."+table+" WHERE tenant_id=$1", tenant).Scan(&rows); err != nil || rows != want {
+				t.Fatalf("%s for %q has %d rows, want %d: %v", table, tenant, rows, want, err)
+			}
+		}
+	}
+	if err := e.svc.DeleteSubject(ctx, e.scope.Tenant, e.scope.Subject); contracts.Code(err) != contracts.ErrUnavailable {
+		t.Fatalf("subject erasure must await settlement: %v", err)
+	}
+	if err := e.svc.DeleteTenant(ctx, e.scope.Tenant); contracts.Code(err) != contracts.ErrUnavailable {
+		t.Fatalf("tenant erasure must await settlement: %v", err)
+	}
+	assertRows(e.scope.Tenant, 2)
+	key, err := leasedOperationKey(target, "effect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.Reconcile(ctx, e.scope, key, []byte(`{"settled":true}`), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.DeleteSubject(ctx, e.scope.Tenant, e.scope.Subject); err != nil {
+		t.Fatal(err)
+	}
+	assertRows(e.scope.Tenant, 1)
+	assertRows(foreign.Tenant, 1)
+	if err := e.svc.DeleteTenant(ctx, e.scope.Tenant); err != nil {
+		t.Fatal(err)
+	}
+	assertRows(e.scope.Tenant, 0)
+	assertRows(foreign.Tenant, 1)
 }

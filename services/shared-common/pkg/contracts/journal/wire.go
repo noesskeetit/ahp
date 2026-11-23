@@ -155,6 +155,16 @@ type CheckpointTuple struct {
 	Writes     []PendingWrite `json:"writes"`
 }
 
+const (
+	IntentPrepared         = "PREPARED"
+	IntentDispatched       = "DISPATCHED"
+	IntentAwaitingApproval = "AWAITING_APPROVAL"
+	IntentAwaitingAuth     = "AWAITING_AUTH"
+	IntentCompleted        = "COMPLETED"
+	IntentRefused          = "REFUSED"
+	IntentUnknown          = "OUTCOME_UNKNOWN"
+)
+
 type IntentTransition struct {
 	TurnSeq            int64    `json:"turn_seq,omitempty"`
 	CallID             string   `json:"call_id"`
@@ -165,8 +175,9 @@ type IntentTransition struct {
 
 type ToolIntent struct {
 	IntentTransition
-	ToolName   string `json:"tool_name"`
-	ArgsDigest []byte `json:"args_digest"`
+	ToolName       string `json:"tool_name"`
+	ArgsDigest     []byte `json:"args_digest"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 type EnqueueRequest struct {

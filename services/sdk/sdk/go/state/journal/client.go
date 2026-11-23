@@ -92,6 +92,14 @@ func (c *Client) RunHeartbeat(ctx context.Context, session string, epoch int64, 
 }
 
 func (c *Client) RunHeartbeatWithControl(ctx context.Context, session string, epoch int64, ttl time.Duration, onControl func(TurnControlDelta)) (context.Context, context.CancelFunc) {
+	return c.runHeartbeat(ctx, session, epoch, ttl, func(renewed SessionLease) {
+		if onControl != nil && renewed.Control != nil {
+			onControl(*renewed.Control)
+		}
+	})
+}
+
+func (c *Client) runHeartbeat(ctx context.Context, session string, epoch int64, ttl time.Duration, onRenewal func(SessionLease)) (context.Context, context.CancelFunc) {
 	leaseCtx, cancel := context.WithCancelCause(ctx)
 	stop := func() { cancel(context.Canceled) }
 	if ttl.Milliseconds() < 1 {
@@ -113,8 +121,8 @@ func (c *Client) RunHeartbeatWithControl(ctx context.Context, session string, ep
 					cancel(err)
 					return
 				}
-				if onControl != nil && renewed.Control != nil {
-					onControl(*renewed.Control)
+				if leaseCtx.Err() == nil {
+					onRenewal(renewed)
 				}
 			}
 		}

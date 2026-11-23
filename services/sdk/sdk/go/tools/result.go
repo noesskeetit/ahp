@@ -43,6 +43,7 @@ type ResultProvenance struct {
 // ArtifactRef points at the immutable artifact holding an oversized result.
 type ArtifactRef struct {
 	ArtifactID string `json:"artifact_id"`
+	Version    string `json:"version,omitempty"`
 	Digest     string `json:"digest"`
 	Size       int64  `json:"size"`
 }
@@ -106,7 +107,7 @@ func (r ToolResult) validate() error {
 			return unknown("inline result also carries an artifact reference")
 		}
 	case StorageArtifact:
-		if r.Ref == nil || r.Ref.ArtifactID == "" || r.Ref.Digest == "" {
+		if r.Ref == nil || r.Ref.ArtifactID == "" || r.Ref.Digest == "" || r.Ref.Size < 0 {
 			return unknown("artifact result carries no verifiable reference")
 		}
 		if len(r.Payload) != 0 {

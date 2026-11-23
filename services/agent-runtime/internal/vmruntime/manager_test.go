@@ -16,6 +16,7 @@ import (
 	"github.com/ahp-platform/ahp/internal/identity"
 	"github.com/ahp-platform/ahp/pkg/contracts"
 	"github.com/ahp-platform/ahp/pkg/contracts/journal"
+	"github.com/ahp-platform/ahp/pkg/labels"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -151,6 +152,89 @@ func expectCode(t *testing.T, err error, code string) {
 	t.Helper()
 	if contracts.Code(err) != code {
 		t.Fatalf("got %v, want error code %s", err, code)
+	}
+}
+
+func TestManagerVMSessionGrantAcrossGenerations(t *testing.T) {
+	ctx, manager, grants, first, _, _ := setup(t)
+	manager.ToolsAllowed = func(scope contracts.Scope) bool { return scope == first.Scope }
+	// This valid runtime session would overflow Identity's context ID limit
+	// if we used its raw value as the suffix.
+	first.SessionID = strings.Repeat("a", 256)
+	first.ID = journal.DeterministicExecutionID(first.Scope, first.SessionID, first.LaunchTurnSeq, first.Generation)
+	if err := manager.EnsureRunning(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	original, err := grants.Evaluate(ctx, first.Scope, first.ID, "tools.leased")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if original.Task != first.ID || original.Context != journal.VMSessionContextID(first.Scope, first.SessionID) {
+		t.Fatalf("unexpected VM task and context: %q %q", original.Task, original.Context)
+	}
+	if _, err := grants.AddLabels(ctx, first.Scope, first.ID, labels.Set{Subjects: []string{first.Scope.Subject}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Fence(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	_, err = grants.Evaluate(ctx, first.Scope, first.ID, "tools.leased")
+	expectCode(t, err, contracts.ErrForbidden)
+
+	second := first
+	second.Generation++
+	second.ID = journal.DeterministicExecutionID(second.Scope, second.SessionID, second.LaunchTurnSeq, second.Generation)
+	if err := manager.EnsureRunning(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := grants.Evaluate(ctx, second.Scope, second.ID, "tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.Task == original.Task || replacement.Root == original.Root ||
+		replacement.Context != original.Context || len(replacement.Labels.Subjects) != 1 || replacement.Labels.Subjects[0] != first.Scope.Subject {
+		t.Fatalf("replacement grant did not preserve the labelled session with fresh execution authority: %+v", replacement)
+	}
+	other := first
+	other.Scope.Deployment = "other-agent"
+	other.ID = journal.DeterministicExecutionID(other.Scope, other.SessionID, other.LaunchTurnSeq, other.Generation)
+	if err := manager.EnsureRunning(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	stateOnly, err := grants.Evaluate(ctx, other.Scope, other.ID, "state.vm_claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stateOnly.Context == original.Context || len(stateOnly.Labels.Subjects) != 0 {
+		t.Fatal("identical session IDs in different scopes shared a context or labels")
+	}
+	for _, capability := range []string{"tools", "tools.leased"} {
+		_, err = grants.Evaluate(ctx, other.Scope, other.ID, capability)
+		expectCode(t, err, contracts.ErrForbidden)
+	}
+}
+
+func TestManagerRequiresNewGenerationForPreV4Root(t *testing.T) {
+	ctx, manager, grants, old, _, processes := setup(t)
+	if _, err := grants.CreateRoot(ctx, old.Scope, identity.RootRequest{
+		Deployment: old.Scope.Deployment, Task: old.ID, Context: "vm:" + old.ID,
+		Capabilities: []string{"state", "state.vm_claim"}, TTL: time.Hour,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager.ToolsAllowed = func(contracts.Scope) bool { return true }
+	expectCode(t, manager.EnsureRunning(ctx, old), contracts.ErrKeyReuse)
+	if processes.starts != 0 {
+		t.Fatal("runtime restarted a legacy grant with the new policy")
+	}
+	if err := manager.Fence(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	newExecution := old
+	newExecution.Generation++
+	newExecution.ID = journal.DeterministicExecutionID(newExecution.Scope, newExecution.SessionID, newExecution.LaunchTurnSeq, newExecution.Generation)
+	if err := manager.EnsureRunning(ctx, newExecution); err != nil {
+		t.Fatal(err)
 	}
 }
 

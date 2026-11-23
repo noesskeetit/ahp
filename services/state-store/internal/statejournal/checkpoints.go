@@ -156,7 +156,7 @@ func (s *Store) CommitCheckpoint(ctx context.Context, scope contracts.Scope, ses
 	if err := prepareIntents(ctx, tx, scope.Tenant, session, lease.Epoch, req.Intents); err != nil {
 		return journal.CheckpointReceipt{}, err
 	}
-	if err := commitOutcomes(ctx, tx, scope.Tenant, session, req.ToolOutcomes); err != nil {
+	if err := commitOutcomes(ctx, tx, scope.Tenant, session, turn.Mode == journal.ExecutionVMManaged, req.ToolOutcomes); err != nil {
 		return journal.CheckpointReceipt{}, err
 	}
 	if err := applySteerAck(ctx, tx, scope, session, &turn, req.SteerAck); err != nil {

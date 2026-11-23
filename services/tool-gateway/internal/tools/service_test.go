@@ -426,3 +426,135 @@ func TestApprovedAmbiguousCallReturnsItsDurableUnknownOnReplay(t *testing.T) {
 		t.Fatalf("UNKNOWN replay dispatched %d effects", n)
 	}
 }
+
+type blockingReplayGuardian struct {
+	entered, released chan struct{}
+}
+
+func (g blockingReplayGuardian) Decide(ctx context.Context, _ contracts.Scope, req GuardRequest) (Decision, error) {
+	if string(req.Arguments) == `{"value":"held"}` {
+		close(g.entered)
+		select {
+		case <-g.released:
+		case <-ctx.Done():
+			return Decision{}, ctx.Err()
+		}
+	}
+	return Decision{Allow: true, Reason: "fixture policy"}, nil
+}
+
+func TestToolReplayRejectsDifferentRequestThatRacesCompletion(t *testing.T) {
+	for _, leased := range []bool{false, true} {
+		name := "legacy"
+		if leased {
+			name = "leased"
+		}
+		t.Run(name, func(t *testing.T) {
+			e, ctx := newTestService(t)
+			g := blockingReplayGuardian{entered: make(chan struct{}), released: make(chan struct{})}
+			e.svc.cfg.Guardian = g
+			if leased {
+				if err := e.svc.MigrateToolLeases(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lease := ToolLease{SessionID: "race", ContextID: "race-context", Epoch: 1, ExpiresAt: time.Now().Add(time.Minute)}
+			call := func(tool, args string) (operations.Operation, error) {
+				if leased {
+					return e.svc.CallWithToolLease(ctx, e.scope, "same-key", tool, json.RawMessage(args), CallProvenance{TaskID: "worker", ContextID: lease.ContextID}, lease)
+				}
+				return e.svc.Call(ctx, e.scope, "same-key", tool, json.RawMessage(args))
+			}
+
+			loser := make(chan error, 1)
+			go func() {
+				_, err := call("echo", `{"value":"held"}`)
+				loser <- err
+			}()
+			select {
+			case <-g.entered:
+			case <-ctx.Done():
+				t.Fatal("race request did not reach Guardian")
+			}
+			winner, err := call("write", `{"value":"winner"}`)
+			close(g.released)
+			if err != nil || winner.Status != operations.StatusSucceeded {
+				t.Fatalf("winner=%v err=%v", winner, err)
+			}
+			select {
+			case err := <-loser:
+				if contracts.Code(err) != contracts.ErrKeyReuse {
+					t.Fatalf("competing request replayed winner: %v", err)
+				}
+			case <-ctx.Done():
+				t.Fatal("racing replay did not finish")
+			}
+			for _, args := range []string{`{"value":"changed"}`, `{"value":"winner"}`} {
+				tool := "write"
+				if args == `{"value":"winner"}` {
+					tool = "echo"
+				}
+				if _, err := call(tool, args); contracts.Code(err) != contracts.ErrKeyReuse {
+					t.Fatalf("sealed operation accepted %s %s: %v", tool, args, err)
+				}
+			}
+			replayed, err := call("write", `{ "value": "winner" }`)
+			if err != nil || replayed.Status != operations.StatusSucceeded || atomic.LoadInt32(e.effCount) != 1 {
+				t.Fatalf("canonical replay=%v err=%v effects=%d", replayed, err, atomic.LoadInt32(e.effCount))
+			}
+		})
+	}
+}
+
+func TestLeaseDispatchRechecksEpochAfterGatewayPrecheck(t *testing.T) {
+	e, ctx := newTestService(t)
+	g := blockingReplayGuardian{entered: make(chan struct{}), released: make(chan struct{})}
+	e.svc.cfg.Guardian = g
+	if err := e.svc.MigrateToolLeases(ctx); err != nil {
+		t.Fatal(err)
+	}
+	first := ToolLease{SessionID: "race", ContextID: "race-context", Epoch: 1, ExpiresAt: time.Now().Add(time.Minute)}
+	second := first
+	second.Epoch++
+	old := make(chan error, 1)
+	go func() {
+		_, err := e.svc.CallWithToolLease(ctx, e.scope, "same-key", "write", json.RawMessage(`{"value":"held"}`),
+			CallProvenance{TaskID: "old", ContextID: first.ContextID}, first)
+		old <- err
+	}()
+	select {
+	case <-g.entered:
+	case <-ctx.Done():
+		t.Fatal("first request did not reach Gateway after precheck")
+	}
+	fenced, err := e.svc.FenceAndLookup(ctx, e.scope, "same-key", second)
+	close(g.released)
+	if err != nil || fenced.Status != "SAFE_TO_RETRY" {
+		t.Fatalf("fence: %+v %v", fenced, err)
+	}
+	select {
+	case err := <-old:
+		if contracts.Code(err) != contracts.ErrStaleEpoch {
+			t.Fatalf("old request passed the dispatch barrier: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("old request did not finish")
+	}
+	if !time.Now().Before(first.ExpiresAt) || atomic.LoadInt32(e.effCount) != 0 {
+		t.Fatal("old proof must still be valid, with zero effects before the new call")
+	}
+	// Remove the latch now that the original request has returned. The new call
+	// must replay exactly the same canonical request to use the accepted ledger key.
+	e.svc.cfg.Guardian = e.g
+	args := json.RawMessage(`{"value":"held"}`)
+	digest, err := ApprovalDigest("write", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.g.AllowDigest(digest)
+	op, err := e.svc.CallWithToolLease(ctx, e.scope, "same-key", "write", args,
+		CallProvenance{TaskID: "new", ContextID: second.ContextID}, second)
+	if err != nil || op.Status != operations.StatusSucceeded || atomic.LoadInt32(e.effCount) != 1 {
+		t.Fatalf("new call=%+v err=%v effects=%d", op, err, atomic.LoadInt32(e.effCount))
+	}
+}

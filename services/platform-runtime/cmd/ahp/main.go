@@ -617,7 +617,7 @@ func (s *server) serveAll(ctx context.Context) error {
 		if envOr("AHP_ENABLE_BROWSER", "") == "1" || s.iam != nil {
 			toolsHumans = idStore
 		}
-		if err := s.tryMountTools(ctx, mux, verifier, authority.authorize, toolsHumans); err != nil {
+		if err := s.tryMountTools(ctx, mux, verifier, authority, toolsHumans); err != nil {
 			return fmt.Errorf("tools plane: %w", err)
 		}
 	}

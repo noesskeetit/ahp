@@ -174,6 +174,14 @@ func newMCPFixture(t *testing.T) *mcpFixture {
 			atomic.AddInt32(&f.effCount, 1)
 			return nil, errors.New("boom")
 		})
+	srv.AddTool(&mcp.Tool{Name: "business", InputSchema: map[string]any{"type": "object"}},
+		func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			atomic.AddInt32(&f.effCount, 1)
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{&mcp.TextContent{Text: "business rejection"}},
+			}, nil
+		})
 	srv.AddTool(&mcp.Tool{Name: "gated", InputSchema: map[string]any{"type": "object"}},
 		func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "gated-ok"}}}, nil
@@ -259,13 +267,13 @@ type env struct {
 	verifier   *auth.Verifier
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T, options ...func(*tools.Config)) *env {
 	t.Helper()
 	dsn := os.Getenv("AHP_TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("set AHP_TEST_DATABASE_URL to run toolsapi integration tests")
 	}
-	return newEnvForDatabase(t, dsn)
+	return newEnvForDatabase(t, dsn, options...)
 }
 
 func newEnvForDatabase(t *testing.T, dsn string, options ...func(*tools.Config)) *env {
@@ -306,6 +314,7 @@ func newEnvForDatabase(t *testing.T, dsn string, options ...func(*tools.Config))
 			"echo":     {Name: "echo", Connection: "c"},
 			"write":    {Name: "write", Connection: "c", SideEffecting: true},
 			"errwrite": {Name: "errwrite", Connection: "c", SideEffecting: true},
+			"business": {Name: "business", Connection: "c", SideEffecting: true},
 			"gated":    {Name: "gated", Connection: "c", RequiresApproval: true},
 		},
 		Verifier: verifier,

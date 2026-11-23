@@ -253,6 +253,25 @@ func (s *Service) call(ctx context.Context, scope contracts.Scope, key, tool str
 		return operations.Operation{}, err
 	}
 
+	guard := ""
+	if spec.SideEffecting {
+		guard = digest
+	}
+	request := operations.Request{Key: key, Kind: EffectKind, Target: tool, Guard: guard, Arguments: args}
+	fingerprint, err := operations.RequestFingerprint(request)
+	if err != nil {
+		return operations.Operation{}, err
+	}
+	replay := func(prior operations.Operation, err error) (operations.Operation, error) {
+		if err != nil {
+			return operations.Operation{}, err
+		}
+		if prior.Target != tool || prior.Digest != fingerprint {
+			return operations.Operation{}, contracts.NewError(contracts.ErrKeyReuse, "tools: operation key was used with a different request")
+		}
+		return prior, nil
+	}
+
 	// Human approval gate FIRST (DEF-TGW-1:2). A tool that forces approval must
 	// already carry a human sign-off for the canonical digest before any Guardian
 	// decision or ledger mutation. The first refusal also registers the pending
@@ -299,7 +318,7 @@ func (s *Service) call(ctx context.Context, scope contracts.Scope, key, tool str
 					prior.Status == operations.StatusSideEffectUnknown ||
 					prior.Status == operations.StatusFailed ||
 					prior.Status == operations.StatusFenced) {
-				return prior, nil
+				return replay(prior, nil)
 			}
 		default:
 			return operations.Operation{}, ErrApprovalRequired
@@ -323,7 +342,7 @@ func (s *Service) call(ctx context.Context, scope contracts.Scope, key, tool str
 		return operations.Operation{}, fmt.Errorf("tools: guardian: %w", gerr)
 	}
 	if !dec.Allow {
-		return operations.Operation{}, contracts.NewError(contracts.ErrForbidden, "tools: guardian denied: "+dec.Reason)
+		return operations.Operation{}, contracts.NewReasoned(contracts.ErrForbidden, "POLICY_DENIED", "tools: guardian denied: "+dec.Reason)
 	}
 
 	// A missing or expired personal credential is an auth-required request, not
@@ -338,33 +357,23 @@ func (s *Service) call(ctx context.Context, scope contracts.Scope, key, tool str
 			return operations.Operation{}, err
 		}
 	}
-	guard := ""
-	if spec.SideEffecting {
-		guard = digest
-	}
-	op, err := s.ledger.Accept(ctx, scope, operations.Request{
-		Key:       key,
-		Kind:      EffectKind,
-		Target:    tool,
-		Guard:     guard,
-		Arguments: args,
-	})
+	op, err := s.ledger.Accept(ctx, scope, request)
 	if err != nil {
 		// A sealed prior operation under this key (SUCCEEDED/FAILED/FENCED) is a
 		// replay of the terminal record rather than a fresh dispatch.
 		if contracts.Code(err) == contracts.ErrConflict {
-			return s.ledger.Get(ctx, scope, key)
+			return replay(s.ledger.Get(ctx, scope, key))
 		}
 		return operations.Operation{}, err
 	}
 	if op.Status != operations.StatusAccepted {
 		// Replay: already accepted earlier and moved on (incl. SIDE_EFFECT_UNKNOWN).
-		return op, nil
+		return replay(op, nil)
 	}
 
 	if _, derr := s.ledger.DispatchCheckedWithProvenance(ctx, scope, key, check, prov.marshal(spec.Connection)); derr != nil {
 		if errors.Is(derr, operations.ErrAlreadyDispatched) {
-			return s.ledger.Get(ctx, scope, key)
+			return replay(s.ledger.Get(ctx, scope, key))
 		}
 		// Ordinary guard conflict: a sibling side effect holds the digest guard.
 		return operations.Operation{}, derr
@@ -422,7 +431,11 @@ func (s *Service) dispatch(ctx context.Context, scope contracts.Scope, key strin
 	// business (an answered error does not prove an effect was absent, so this
 	// must not silently become FAILED for side-effecting tools).
 	if res != nil && res.IsError {
-		payload, _ := json.Marshal(map[string]any{FailureKey: ToolFailure(ctx, toolErrorExcerpt(res))})
+		outcome := map[string]any{FailureKey: ToolFailure(ctx, toolErrorExcerpt(res))}
+		if binding.ContextID != "" {
+			outcome["isError"] = true
+		}
+		payload, _ := json.Marshal(outcome)
 		op, cerr2 := s.ledger.Complete(ctx, scope, key, payload, false)
 		if cerr2 != nil {
 			return operations.Operation{}, fmt.Errorf("tools: complete: %w", cerr2)

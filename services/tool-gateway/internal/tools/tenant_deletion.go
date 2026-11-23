@@ -44,7 +44,7 @@ func (s *Service) DeleteTenant(ctx context.Context, tenant string) error {
 				return err
 			}
 		}
-		return nil
+		return s.deleteToolLeaseRows(ctx, tx, tenant, "")
 	})
 }
 

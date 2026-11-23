@@ -280,13 +280,22 @@ func TestV32FirecrackerGuest(t *testing.T) {
 		t.Fatal(err)
 	}
 	turn, err := client.ClaimVMTurn(ctx, boot.SessionID, journal.VMTurnClaimRequest{TurnSeq: boot.LaunchTurnSeq,
-		Generation: boot.Generation, ExecutionID: boot.ExecutionID, TTLMilliseconds: 30000})
+		Generation: boot.Generation, ExecutionID: boot.ExecutionID, TTLMilliseconds: 7000})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var input processInput
 	if err := json.Unmarshal(turn.Input.Inline, &input); err != nil {
 		t.Fatal(err)
+	}
+	// The work mode is carried by the claimed input. Keep the short claim for
+	// the fence scenario, and give the other scenarios the normal lease.
+	if input.Mode != "fence" {
+		renewed, err := client.HeartbeatLease(ctx, boot.SessionID, turn.Epoch, 30*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		turn.Lease, turn.ToolLeaseProof = renewed.Lease, renewed.ToolLeaseProof
 	}
 	switch input.Mode {
 	case "warm":
@@ -326,7 +335,7 @@ func runV32FirecrackerFenceGuest(ctx context.Context, client *stateclient.Client
 			return fmt.Errorf("save durable checkpoint and intent: %+v %v", receipt, err)
 		}
 		if _, err := client.HeartbeatLease(ctx, boot.SessionID, turn.Epoch, 7*time.Second); err != nil {
-			return fmt.Errorf("shorten lease: %w", err)
+			return fmt.Errorf("renew lease before freezing: %w", err)
 		}
 		decision, err := client.BeginStandaloneTool(ctx, boot.SessionID, turn.Epoch, tool)
 		if err != nil || !decision.CanExecute || decision.Status != statejournal.IntentDispatched {

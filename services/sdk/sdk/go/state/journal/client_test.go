@@ -310,3 +310,36 @@ func TestFinishClaimedTurnReplaysPreparedResult(t *testing.T) {
 		t.Fatalf("terminal method re-staged or retried unexpectedly: %d requests", calls.Load())
 	}
 }
+
+func TestVMLeaseTracksWarmProofAndIgnoresLateHeartbeat(t *testing.T) {
+	start := time.Unix(1000, 0)
+	first := journal.ClaimedTurn{TurnLease: journal.TurnLease{SessionID: "s", InputSeq: 1,
+		Lease: journal.Lease{Worker: "vm", Epoch: 1, ExpiresAt: start}}, ToolLeaseProof: "claim"}
+	lease := journal.NewVMLease(first)
+	next := first.TurnLease
+	next.InputSeq, next.ExpiresAt = 2, start.Add(time.Minute)
+	receipt := journal.AppendReceipt{Control: &journal.TurnControlDelta{TurnSeq: 2, NextTurn: &next, ToolLeaseProof: "finish"}}
+	if !lease.ApplyFinish(1, receipt) {
+		t.Fatal("same-owner warm turn did not promote")
+	}
+	late := journal.SessionLease{Lease: first.Lease, ToolLeaseProof: "stale",
+		Control: &journal.TurnControlDelta{TurnSeq: 1, CancelRequested: true}}
+	if got := lease.ApplyHeartbeat(late); got != nil || lease.Current().ToolLeaseProof != "finish" {
+		t.Fatalf("late heartbeat leaked control or replaced proof: %+v", got)
+	}
+	late.ExpiresAt = next.ExpiresAt.Add(time.Minute)
+	late.ToolLeaseProof = "renewed"
+	if got := lease.ApplyHeartbeat(late); got != nil || lease.Current().ToolLeaseProof != "renewed" {
+		t.Fatalf("renewed lease lost proof or leaked foreign control: %+v", got)
+	}
+	late.Control.TurnSeq = 2
+	if got := lease.ApplyHeartbeat(late); got == nil || !got.CancelRequested {
+		t.Fatalf("control for current turn was lost: %+v", got)
+	}
+	if lease.ApplyFinish(1, receipt) || lease.Current().InputSeq != 2 || lease.Current().ToolLeaseProof != "renewed" {
+		t.Fatalf("stale finish replaced active turn or proof: %+v", lease.Current())
+	}
+	if lease.ApplyFinish(2, journal.AppendReceipt{}) || lease.Current().ToolLeaseProof != "" {
+		t.Fatalf("completed turn retains proof: %+v", lease.Current())
+	}
+}
