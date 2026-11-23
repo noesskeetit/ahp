@@ -25,6 +25,7 @@ type BlobRef struct {
 }
 
 type EventInput struct {
+	TurnSeq  int64   `json:"turn_seq,omitempty"`
 	ID       string  `json:"id"`
 	ParentID string  `json:"parent_id,omitempty"`
 	Type     string  `json:"type"`
@@ -55,6 +56,8 @@ type PreparedIntent struct {
 type SHA256Digest [sha256.Size]byte
 
 type AppendRequest struct {
+	TurnSeq      int64                  `json:"turn_seq,omitempty"`
+	SteerAck     *SteerAck              `json:"steer_ack,omitempty"`
 	Key          string                 `json:"key"`
 	ExpectedSeq  int64                  `json:"expected_seq"`
 	Events       []EventInput           `json:"events"`
@@ -80,8 +83,9 @@ type PointerUpdate struct {
 }
 
 type AppendReceipt struct {
-	FirstSeq int64 `json:"first_seq"`
-	HeadSeq  int64 `json:"head_seq"`
+	Control  *TurnControlDelta `json:"control,omitempty"`
+	FirstSeq int64             `json:"first_seq"`
+	HeadSeq  int64             `json:"head_seq"`
 }
 
 type Event struct {
@@ -136,6 +140,8 @@ type Checkpoint struct {
 }
 
 type CheckpointCommit struct {
+	TurnSeq      int64              `json:"turn_seq,omitempty"`
+	SteerAck     *SteerAck          `json:"steer_ack,omitempty"`
 	Key          string             `json:"key"`
 	Checkpoint   Checkpoint         `json:"checkpoint"`
 	Writes       []PendingWrite     `json:"writes,omitempty"`
@@ -150,6 +156,7 @@ type CheckpointTuple struct {
 }
 
 type IntentTransition struct {
+	TurnSeq            int64    `json:"turn_seq,omitempty"`
 	CallID             string   `json:"call_id"`
 	Status             string   `json:"status"`
 	GatewayOperationID string   `json:"gateway_operation_id"`
@@ -163,6 +170,9 @@ type ToolIntent struct {
 }
 
 type EnqueueRequest struct {
+	ExecutionMode string  `json:"execution_mode,omitempty"`
+	DeliveryMode  string  `json:"delivery_mode,omitempty"`
+	TargetTurnSeq int64   `json:"target_turn_seq,omitempty"`
 	SessionID     string  `json:"session_id"`
 	Harness       string  `json:"harness_type"`
 	FormatVersion int     `json:"format_version"`
@@ -171,8 +181,12 @@ type EnqueueRequest struct {
 }
 
 type EnqueueReceipt struct {
-	SessionID string `json:"session_id"`
-	HeadSeq   int64  `json:"head_seq"`
+	Status        string `json:"session_status,omitempty"`
+	AcceptedMode  string `json:"accepted_mode,omitempty"`
+	FollowupCount int    `json:"followup_count,omitempty"`
+	Epoch         int64  `json:"lease_epoch,omitempty"`
+	SessionID     string `json:"session_id"`
+	HeadSeq       int64  `json:"head_seq"`
 }
 
 type TurnLease struct {
@@ -284,6 +298,7 @@ type CatalogSession struct {
 
 // StandaloneToolRequest identifies an already committed tool intent.
 type StandaloneToolRequest struct {
+	TurnSeq    int64        `json:"turn_seq,omitempty"`
 	CallID     string       `json:"call_id"`
 	ToolName   string       `json:"tool_name"`
 	ArgsDigest SHA256Digest `json:"args_digest"`

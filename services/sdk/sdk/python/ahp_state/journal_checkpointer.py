@@ -17,8 +17,9 @@ from langgraph.checkpoint.base import (
 from ahp_state import wire
 from ahp_state.checkpoint_saver import AHPCheckpointSaver, NAMESPACE
 from ahp_state.client import StateAPIError, StateValidationError
-from ahp_state.journal_client import AHPJournalClient
+from ahp_state.journal_client import AHPJournalClient, _receipt_for_turn
 from ahp_state.journal_payload import decode_payload, encode_payload
+from ahp_state.sync import invoke_sync
 
 
 _CHAT_CACHE_BYTES = 64 * 1024
@@ -27,20 +28,31 @@ _CHAT_CACHE_BYTES = 64 * 1024
 class AHPJournalCheckpointSaver(AHPCheckpointSaver):
     """Persist complete typed snapshots and independent pending node writes."""
 
-    def __init__(self, client, thread_id, fence, *, namespace=NAMESPACE, chat_channel=None):
+    def __init__(self, client, thread_id, fence, *, namespace=NAMESPACE, chat_channel=None, turn_seq=None):
         self._journal = fence if isinstance(fence, AHPJournalClient) else None
         if self._journal is not None and self._journal.session_id != thread_id:
             raise StateValidationError("INVALID_ARGUMENT", "journal lease belongs to another session")
         super().__init__(client, thread_id, fence, namespace=namespace)
         self._chat_channel = chat_channel
+        if turn_seq is None:
+            turn_seq = self._journal.turn_seq if self._journal is not None else (fence or {}).get("turn_seq")
+        self._turn_seq = turn_seq
         # invoke_sync uses a shallow view with a fresh transport. Share only the
         # bounded projection slot so sequential sync writes retain the same hint.
         self._chat_slot = [None]
+        self._control_slot = [None]
         if self._journal is not None:
             self._journal.on_lease_end(self.clear_chat_cache)
 
     def clear_chat_cache(self):
         self._chat_slot[0] = None
+
+    @property
+    def control(self):
+        """Control from the last successful checkpoint commit on this saver."""
+        if self._journal is not None and self._journal.turn_seq != self._turn_seq:
+            return None
+        return self._control_slot[0]
 
     def _epoch(self):
         return self._journal.epoch if self._journal is not None else self._fence["epoch"]
@@ -114,7 +126,8 @@ class AHPJournalCheckpointSaver(AHPCheckpointSaver):
             ],
         )
 
-    async def aput(self, config, checkpoint, metadata, new_versions):
+    async def aput(self, config, checkpoint, metadata, new_versions, *, steer_ack=None):
+        """Supply steer_ack only if the checkpoint already includes that input."""
         self._check_session(config)
         lg, namespace = self._ns_of(config)
         cp_id = checkpoint["id"]
@@ -131,6 +144,10 @@ class AHPJournalCheckpointSaver(AHPCheckpointSaver):
         if parent:
             doc["parent_id"] = wire.encode_id(parent)
         body = {"lease_epoch": epoch, "key": f"cp:{encoded_id}", "checkpoint": doc}
+        if self._turn_seq is not None:
+            body["turn_seq"] = self._turn_seq
+        if steer_ack is not None:
+            body["steer_ack"] = steer_ack
         slot = None
         cache_enabled = getattr(self._client, "has_fixed_scope", True)
         if self._chat_channel is not None and not lg:
@@ -155,14 +172,15 @@ class AHPJournalCheckpointSaver(AHPCheckpointSaver):
                     slot = candidate
         path = self._session_path() + "/checkpoints"
         try:
-            await self._write(path, body)
+            receipt = await self._write(path, body)
         except StateAPIError as exc:
             # A lost ACK across an SDK upgrade can replay a row whose metadata
             # was stored only inside the typed payload. The server still checks
             # every other byte against the original operation.
             if exc.code != "KEY_REUSE_MISMATCH" or not doc["metadata"]:
                 raise
-            await self._write(path, {**body, "checkpoint": {**doc, "metadata": {}}})
+            receipt = await self._write(path, {**body, "checkpoint": {**doc, "metadata": {}}})
+        self._control_slot[0] = (_receipt_for_turn(receipt, self._turn_seq) or {}).get("control")
         if self._chat_channel is not None and not lg:
             try:
                 if epoch == self._epoch():
@@ -170,6 +188,9 @@ class AHPJournalCheckpointSaver(AHPCheckpointSaver):
             except StateAPIError:
                 self.clear_chat_cache()
         return self._config_for(lg, cp_id)
+
+    def put(self, config, checkpoint, metadata, new_versions, *, steer_ack=None):
+        return invoke_sync(self, lambda view: view.aput(config, checkpoint, metadata, new_versions, steer_ack=steer_ack))
 
     def _chat_messages(self, checkpoint):
         messages = checkpoint.get("channel_values", {}).get(self._chat_channel, [])
@@ -197,9 +218,10 @@ class AHPJournalCheckpointSaver(AHPCheckpointSaver):
             for index, (channel, value) in enumerate(writes)
         ]
         path = f"{self._session_path()}/checkpoints/{quote(wire.encode_id(cp_id), safe='')}/writes"
-        await self._write(path, {
-            "lease_epoch": self._epoch(), "namespace": namespace, "writes": rows,
-        })
+        body = {"lease_epoch": self._epoch(), "namespace": namespace, "writes": rows}
+        if self._turn_seq is not None:
+            body["turn_seq"] = self._turn_seq
+        await self._write(path, body)
 
     async def alist(self, config, *, filter=None, before=None, limit=None):
         self._check_session(config)

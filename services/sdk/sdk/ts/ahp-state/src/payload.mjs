@@ -26,9 +26,10 @@ export async function loadJournalJSON(client, path, payload) {
   return JSON.parse(value.toString('utf8'));
 }
 
-export async function beginStandaloneTool(client, path, epoch, key, tool, argsDigest) {
+export async function beginStandaloneTool(client, path, epoch, key, tool, argsDigest, turnSeq) {
   const route = path + '/tools:begin-standalone';
-  const body = {lease_epoch: epoch, call_id: key, tool_name: tool, args_digest: [...argsDigest]};
+  const body = {lease_epoch: epoch, call_id: key, tool_name: tool, args_digest: [...argsDigest],
+    ...(turnSeq !== undefined && {turn_seq: turnSeq})};
   try {
     return await client.request('POST', route, {body});
   } catch (error) {

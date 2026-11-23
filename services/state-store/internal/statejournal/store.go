@@ -92,7 +92,7 @@ func (s *Store) AcquireOrCreateSession(ctx context.Context, scope contracts.Scop
 		    lease_expires_at=clock_timestamp()+$8*interval '1 microsecond'
 		WHERE stored.deployment_id=EXCLUDED.deployment_id AND stored.subject_id=EXCLUDED.subject_id
 		  AND stored.harness_type=EXCLUDED.harness_type AND stored.format_version=EXCLUDED.format_version AND NOT stored.dots_fifo
-		  AND stored.status<>'DELETED' AND stored.turn_input_seq IS NULL
+		  AND stored.status<>'DELETED' AND stored.turn_input_seq IS NULL AND stored.execution_mode='worker_pull'
 		  AND (stored.lease_expires_at IS NULL OR stored.lease_expires_at<=clock_timestamp())
 		RETURNING lease_owner, lease_epoch, lease_expires_at`,
 		scope.Tenant, session, scope.Deployment, scope.Subject, harness, version, worker, ttl.Microseconds()).
@@ -116,7 +116,7 @@ func (s *Store) AcquireSession(ctx context.Context, scope contracts.Scope, sessi
 		SET status='ACTIVE', lease_owner=$5, lease_epoch=lease_epoch+1,
 		    lease_expires_at=clock_timestamp()+$6*interval '1 microsecond'
 		WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4
-		  AND status <> 'DELETED' AND turn_input_seq IS NULL AND NOT dots_fifo
+		  AND status <> 'DELETED' AND turn_input_seq IS NULL AND NOT dots_fifo AND execution_mode='worker_pull'
 		  AND (lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp())
 		RETURNING lease_owner, lease_epoch, lease_expires_at`,
 		scope.Tenant, session, scope.Deployment, scope.Subject, worker, ttl.Microseconds()).
@@ -185,7 +185,7 @@ func (s *Store) DeleteSession(ctx context.Context, scope contracts.Scope, sessio
 	_, err := s.pool.Exec(ctx, `
 		UPDATE ahp_journal.sessions
 		SET status='DELETED', lease_epoch=lease_epoch+1, lease_owner=NULL, lease_expires_at=NULL,
-		    turn_input_seq=NULL, queued_at=NULL, deleted_at=clock_timestamp()
+		    turn_input_seq=NULL, queued_at=NULL, cancel_requested=false, followup_count=0, deleted_at=clock_timestamp()
 		WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4 AND status <> 'DELETED'`,
 		scope.Tenant, session, scope.Deployment, scope.Subject)
 	return err
@@ -221,12 +221,14 @@ func (s *Store) ListSessions(ctx context.Context, scope contracts.Scope, harness
 }
 
 // lockSession returns the active lease and head while holding the session lock.
-func lockSession(ctx context.Context, tx pgx.Tx, scope contracts.Scope, session string, lease Lease) (int64, error) {
+func lockSessionState(ctx context.Context, tx pgx.Tx, scope contracts.Scope, session string, lease Lease) (int64, managedTurn, error) {
 	var head int64
 	var valid bool
+	var turn managedTurn
 	err := tx.QueryRow(ctx, `
 		WITH locked AS MATERIALIZED (
-			SELECT head_seq, lease_epoch, lease_owner, lease_expires_at
+			SELECT head_seq, lease_epoch, lease_owner, lease_expires_at,
+			       execution_mode, coalesce(turn_input_seq,0) AS turn_seq, steer_acked_seq, followup_count, cancel_requested
 			FROM ahp_journal.sessions
 			WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4
 			  AND status <> 'DELETED'
@@ -234,18 +236,18 @@ func lockSession(ctx context.Context, tx pgx.Tx, scope contracts.Scope, session 
 		)
 		SELECT head_seq, coalesce(
 		    lease_epoch=$5 AND lease_owner=$6 AND lease_expires_at > clock_timestamp(), false
-		) FROM locked`,
-		scope.Tenant, session, scope.Deployment, scope.Subject, lease.Epoch, lease.Worker).Scan(&head, &valid)
+		), execution_mode, turn_seq, steer_acked_seq, followup_count, cancel_requested FROM locked`,
+		scope.Tenant, session, scope.Deployment, scope.Subject, lease.Epoch, lease.Worker).Scan(&head, &valid, &turn.Mode, &turn.Seq, &turn.Ack, &turn.Followups, &turn.Cancel)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, contracts.NewError(contracts.ErrNotFound, "session not found")
+		return 0, turn, contracts.NewError(contracts.ErrNotFound, "session not found")
 	}
 	if err != nil {
-		return 0, err
+		return 0, turn, err
 	}
 	if !valid {
-		return 0, contracts.NewError(contracts.ErrStaleEpoch, "session lease has expired or been superseded")
+		return 0, turn, contracts.NewError(contracts.ErrStaleEpoch, "session lease has expired or been superseded")
 	}
-	return head, nil
+	return head, turn, nil
 }
 
 func validID(s string) bool {

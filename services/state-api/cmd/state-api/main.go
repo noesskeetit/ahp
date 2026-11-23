@@ -77,7 +77,7 @@ func readGrants(path string) (grantPolicy, error) {
 			return grantPolicy{}, errors.New("grant requires tenant, deployment, subject, grant ID and state capability")
 		}
 		for _, capability := range rule.Capabilities {
-			if capability != "state" && capability != "state.shared" && capability != "state.retention" {
+			if capability != "state" && capability != "state.shared" && capability != "state.retention" && capability != "state.coordinate" && capability != "state.vm_claim" {
 				return grantPolicy{}, errors.New("unexpected capability in State API grant file")
 			}
 		}

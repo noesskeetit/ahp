@@ -129,6 +129,7 @@ type kvReceipt struct {
 }
 
 type KVBatch struct {
+	TurnSeq     int64
 	Key         string
 	ExpectedSeq int64
 	KV          []KVMutation
@@ -139,7 +140,7 @@ type KVBatch struct {
 // A receipt in reserved session KV makes retries durable without another table.
 func (s *Store) MutateKV(ctx context.Context, scope contracts.Scope, session string, lease Lease, shared bool, mutation KVBatch) (AppendReceipt, error) {
 	key, expectedSeq, changes := mutation.Key, mutation.ExpectedSeq, mutation.KV
-	request := AppendRequest{Key: key, ExpectedSeq: expectedSeq, KV: changes, Catalog: mutation.Catalog}
+	request := AppendRequest{Key: key, ExpectedSeq: expectedSeq, TurnSeq: mutation.TurnSeq, KV: changes, Catalog: mutation.Catalog}
 	if err := scope.Validate(); err != nil {
 		return AppendReceipt{}, err
 	}
@@ -156,8 +157,11 @@ func (s *Store) MutateKV(ctx context.Context, scope contracts.Scope, session str
 		return AppendReceipt{}, err
 	}
 	defer tx.Rollback(ctx)
-	head, err := lockSession(ctx, tx, scope, session, lease)
+	head, turn, err := lockSessionState(ctx, tx, scope, session, lease)
 	if err != nil {
+		return AppendReceipt{}, err
+	}
+	if err := turn.validate(mutation.TurnSeq, nil); err != nil {
 		return AppendReceipt{}, err
 	}
 	var stored []byte

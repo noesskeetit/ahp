@@ -7,15 +7,19 @@ import pytest
 pytest.importorskip("google.adk")
 
 from google.adk.events import Event, EventActions  # noqa: E402
+from google.adk.errors import StaleSessionError  # noqa: E402
 from google.genai import types  # noqa: E402
 
-from ahp_state import AHPJournalSessionService, StateNotFoundError, StateTimeoutError, StateValidationError  # noqa: E402
+from ahp_state import (  # noqa: E402
+    AHPJournalSessionService, StateConflictError, StateNotFoundError, StateTimeoutError, StateValidationError,
+)
 
 
 class ADKTransport:
     def __init__(self):
         self.sessions = {}
         self.calls = []
+        self.receipts = {}
         self.lose_ack = False
 
     async def request_state(self, method, path, *, params=None, body=None):
@@ -45,7 +49,13 @@ class ADKTransport:
             return deepcopy(reply)
         if path.endswith("/events:append"):
             assert body["lease_epoch"] == values["epoch"]
-            assert body["expected_seq"] == len(rows)
+            token = session_id, body["key"]
+            if token in self.receipts:
+                saved_body, receipt = self.receipts[token]
+                assert body == saved_body
+                return deepcopy(receipt)
+            if body["expected_seq"] != len(rows):
+                raise StateConflictError("CONFLICT", "session head has changed")
             for delta in body["kv"]:
                 scope, key = delta["scope_type"], delta["key"]
                 version = values["kv"].get((scope, key), {}).get("version", 0)
@@ -56,10 +66,12 @@ class ADKTransport:
             row, = body["events"]
             rows.append({**row, "seq": len(rows) + 1})
             values["catalog"] = body["catalog"]
+            receipt = {"first_seq": len(rows), "head_seq": len(rows), "control": values.get("control")}
+            self.receipts[token] = deepcopy((body, receipt))
             if self.lose_ack:
                 self.lose_ack = False
                 raise StateTimeoutError("TIMEOUT", "lost append acknowledgement")
-            return {"first_seq": len(rows), "head_seq": len(rows)}
+            return receipt
         if path.endswith(":heartbeat") and body.get("release"):
             values["status"] = body["status"]
             return {}
@@ -162,3 +174,41 @@ async def test_claimed_adk_turn_can_initialize_after_queue_input():
     assert session.events == []
     assert transport.sessions["queued"]["rows"][1]["type"] == "adk.init"
     assert not any(path.endswith(":acquire") for _, path, _, _ in transport.calls)
+
+
+async def test_vm_adk_ack_records_native_user_input_and_old_sessions_cannot_cross_turns():
+    transport = ADKTransport()
+    await transport.request_state("POST", "/v1/state/sessions:acquire", body={"session_id": "session"})
+    identity = {"app_name": "app", "user_id": "user"}
+    journal = AHPJournalSessionService(transport, **identity)
+    first = journal.bind_session("session", 1, turn_seq=1)
+    session = await journal.create_session(**identity, session_id="session")
+    rows = transport.sessions["session"]["rows"]
+    rows.append({"seq": 2, "id": "steer-2", "type": "turn.steer"})
+    transport.sessions["session"]["control"] = {"turn_seq": 1, "pending_steer": [{"seq": 2, "turn_seq": 1}]}
+    await journal.append_event(session, Event(id="progress", author="model"))
+    assert first.control == transport.sessions["session"]["control"]
+    assert "steer_ack" not in transport.calls[-1][3]
+
+    ack = {"turn_seq": 1, "up_to_seq": 2, "count": 1}
+    with pytest.raises(StateValidationError, match="native user input"):
+        await journal.append_event(session, Event(id="wrong", author="model"), steer_ack=ack)
+    transport.sessions["session"]["control"] = {"turn_seq": 4, "next_turn": {"input_seq": 4, "epoch": 1}}
+    event = Event(id="applied", author="user", content=types.Content(
+        role="user", parts=[types.Part(text="adjust the output")],
+    ))
+    transport.lose_ack = True
+    await journal.append_event(session, event, steer_ack=ack, finish_turn="IDLE")
+    body = transport.calls[-1][3]
+    assert body["turn_seq"] == 1 and body["steer_ack"] == ack
+    assert rows[-1]["role"] == "user"
+    assert first.control["next_turn"]["input_seq"] == 4
+
+    second = journal.bind_session("session", 1, turn_seq=4)
+    with pytest.raises(StaleSessionError, match="turn"):
+        await journal.append_event(session, Event(id="late", author="model"))
+    restored = await journal.get_session(**identity, session_id="session")
+    transport.sessions["session"]["control"] = {"turn_seq": 1, "cancel_requested": True}
+    await second.append_event(restored, Event(id="new", author="model"))
+    assert transport.calls[-1][3]["turn_seq"] == 4
+    assert second.control is None

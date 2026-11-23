@@ -11,7 +11,7 @@ import (
 func (s *Store) FindExpiredTurnTenants(ctx context.Context) ([]string, error) {
 	rows, err := s.pool.Query(ctx, `
         SELECT DISTINCT tenant_id FROM ahp_journal.sessions
-        WHERE status='ACTIVE' AND turn_input_seq IS NOT NULL AND NOT dots_fifo
+        WHERE status='ACTIVE' AND turn_input_seq IS NOT NULL AND NOT dots_fifo AND execution_mode='worker_pull'
           AND lease_expires_at<=statement_timestamp()
         ORDER BY tenant_id`)
 	if err != nil {

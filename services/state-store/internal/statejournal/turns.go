@@ -70,6 +70,15 @@ func (s *Store) enqueueTurn(ctx context.Context, scope contracts.Scope, req Enqu
 	if err := scope.Validate(); err != nil {
 		return receipt, err
 	}
+	if req.ExecutionMode != "" && req.ExecutionMode != journal.ExecutionPull && req.ExecutionMode != journal.ExecutionVMManaged {
+		return receipt, contracts.NewError(contracts.ErrInvalid, "invalid execution mode")
+	}
+	if req.DeliveryMode != "" && req.DeliveryMode != journal.DeliveryTurn && req.DeliveryMode != journal.DeliverySteer && req.DeliveryMode != journal.DeliveryFollowup {
+		return receipt, contracts.NewError(contracts.ErrInvalid, "invalid delivery mode")
+	}
+	if req.TargetTurnSeq < 0 || (req.TargetTurnSeq != 0 && req.DeliveryMode != journal.DeliverySteer) {
+		return receipt, contracts.NewError(contracts.ErrInvalid, "target turn is only valid for steer")
+	}
 	if !validID(req.SessionID) || !validID(req.Harness) || !validID(req.Key) ||
 		req.FormatVersion < 1 || req.Input.Blob != nil ||
 		!validPayload(req.Input) || !json.Valid(req.Input.Inline) {
@@ -98,22 +107,26 @@ func (s *Store) enqueueTurn(ctx context.Context, scope contracts.Scope, req Enqu
 	defer tx.Rollback(ctx)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO ahp_journal.sessions
-			(tenant_id,session_id,deployment_id,subject_id,harness_type,format_version,dots_fifo)
-		VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
-		scope.Tenant, req.SessionID, scope.Deployment, scope.Subject, req.Harness, req.FormatVersion, dots)
+			(tenant_id,session_id,deployment_id,subject_id,harness_type,format_version,dots_fifo,execution_mode)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,coalesce(nullif($8,''),'worker_pull')) ON CONFLICT DO NOTHING`,
+		scope.Tenant, req.SessionID, scope.Deployment, scope.Subject, req.Harness, req.FormatVersion, dots, req.ExecutionMode)
 	if err != nil {
 		return receipt, err
 	}
 	var head int64
-	var status string
+	var status, executionMode string
 	var hasLease bool
+	var turnSeq, epoch int64
+	var followups int
 	err = tx.QueryRow(ctx, `
-		SELECT head_seq,status,coalesce(lease_expires_at>clock_timestamp(),false)
+		SELECT head_seq,status,coalesce(lease_expires_at>clock_timestamp(),false),
+		       execution_mode,coalesce(turn_input_seq,0),lease_epoch,followup_count
 		FROM ahp_journal.sessions
 		WHERE tenant_id=$1 AND session_id=$2 AND deployment_id=$3 AND subject_id=$4
 		  AND harness_type=$5 AND format_version=$6 AND dots_fifo=$7 AND status<>'DELETED'
-		FOR UPDATE`, scope.Tenant, req.SessionID, scope.Deployment, scope.Subject, req.Harness, req.FormatVersion, dots).
-		Scan(&head, &status, &hasLease)
+		  AND ($8='' OR execution_mode=$8)
+		FOR UPDATE`, scope.Tenant, req.SessionID, scope.Deployment, scope.Subject, req.Harness, req.FormatVersion, dots, req.ExecutionMode).
+		Scan(&head, &status, &hasLease, &executionMode, &turnSeq, &epoch, &followups)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return receipt, contracts.NewError(contracts.ErrConflict, "session unavailable for admission")
 	}
@@ -122,18 +135,31 @@ func (s *Store) enqueueTurn(ctx context.Context, scope contracts.Scope, req Enqu
 	}
 	receipt.SessionID = req.SessionID
 	var stored []byte
+	var admissionReceipt *EnqueueReceipt
 	err = tx.QueryRow(ctx, `
-		SELECT result_head_seq,request_digest,coalesce(dots_run_id,''),coalesce(dots_run_sequence,0)
+		SELECT result_head_seq,request_digest,coalesce(dots_run_id,''),coalesce(dots_run_sequence,0),admission_receipt
 		FROM ahp_journal.session_events
 		WHERE tenant_id=$1 AND session_id=$2 AND operation_key=$3`,
-		scope.Tenant, req.SessionID, key).Scan(&receipt.HeadSeq, &stored, &receipt.RunID, &receipt.RunSequence)
+		scope.Tenant, req.SessionID, key).Scan(&receipt.HeadSeq, &stored, &receipt.RunID, &receipt.RunSequence, &admissionReceipt)
 	switch {
 	case err == nil && bytes.Equal(stored, digest[:]):
+		if admissionReceipt != nil {
+			receipt.EnqueueReceipt = *admissionReceipt
+		}
 		return receipt, nil
 	case err == nil:
 		return journal.DotsEnqueueReceipt{}, contracts.NewError(contracts.ErrKeyReuse, "turn key has a different input")
 	case !errors.Is(err, pgx.ErrNoRows):
 		return journal.DotsEnqueueReceipt{}, err
+	case executionMode == journal.ExecutionVMManaged:
+		admitted, err := enqueueManagedTurn(ctx, tx, scope, req, key, digest[:], head, epoch, turnSeq, status, followups)
+		if err != nil {
+			return journal.DotsEnqueueReceipt{}, err
+		}
+		receipt.EnqueueReceipt = admitted
+		return receipt, tx.Commit(ctx)
+	case req.DeliveryMode != "" && req.DeliveryMode != journal.DeliveryTurn:
+		return journal.DotsEnqueueReceipt{}, contracts.NewError(contracts.ErrConflict, "turn control requires a VM-managed session")
 	case !dots && (hasLease || (status != SessionIdle && status != SessionWaitingInput)):
 		return journal.DotsEnqueueReceipt{}, contracts.NewError(contracts.ErrConflict, "the session already has a turn")
 	case dots && status != SessionIdle && status != SessionQueued && status != SessionActive:
@@ -200,7 +226,7 @@ func (s *Store) claimTurn(ctx context.Context, scope contracts.Scope, session, w
 		WITH ready AS MATERIALIZED (
 			SELECT s.tenant_id,s.session_id FROM ahp_journal.sessions s
 			WHERE s.tenant_id=$1 AND s.deployment_id=$2 AND s.subject_id=$3
-			  AND ($4='' OR s.session_id=$4) AND s.dots_fifo=$7
+			  AND ($4='' OR s.session_id=$4) AND s.dots_fifo=$7 AND s.execution_mode='worker_pull'
 			  AND (s.status='QUEUED' OR (s.status='ACTIVE' AND s.turn_input_seq IS NOT NULL
 				 AND s.lease_expires_at<=statement_timestamp()))
 			  AND (NOT $7 OR EXISTS (
@@ -269,7 +295,7 @@ func (s *Store) RequeueExpiredTurns(ctx context.Context, tenant string, batch in
 	tag, err := s.pool.Exec(ctx, `
 		WITH expired AS (
 			SELECT tenant_id,session_id FROM ahp_journal.sessions
-			WHERE tenant_id=$1 AND status='ACTIVE' AND turn_input_seq IS NOT NULL AND NOT dots_fifo
+			WHERE tenant_id=$1 AND status='ACTIVE' AND turn_input_seq IS NOT NULL AND NOT dots_fifo AND execution_mode='worker_pull'
 			  AND lease_expires_at<=statement_timestamp()
 			ORDER BY lease_expires_at,session_id LIMIT $2 FOR UPDATE SKIP LOCKED
 		)

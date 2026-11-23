@@ -28,7 +28,11 @@ func (s *Store) BeginStandaloneTool(ctx context.Context, scope contracts.Scope, 
 	}
 	decision.CallID = request.CallID
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if _, err := lockSession(ctx, tx, scope, session, lease); err != nil {
+		_, turn, err := lockSessionState(ctx, tx, scope, session, lease)
+		if err != nil {
+			return err
+		}
+		if err := turn.validate(request.TurnSeq, nil); err != nil {
 			return err
 		}
 		var (
@@ -37,7 +41,7 @@ func (s *Store) BeginStandaloneTool(ctx context.Context, scope contracts.Scope, 
 			args     []byte
 			response Payload
 		)
-		err := tx.QueryRow(ctx, `
+		err = tx.QueryRow(ctx, `
 			SELECT status, coalesce(gateway_operation_id,''), prepared_epoch, tool_name,
 			       args_digest, response_payload, response_blob_ref
 			FROM ahp_journal.tool_intents WHERE tenant_id=$1 AND session_id=$2 AND call_id=$3`,

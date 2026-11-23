@@ -42,6 +42,67 @@ class CompactSessionHandle {
     this.routed = [];
     this.closed = false;
     this.lost = false;
+    this.steering = new Map();
+    this.cancelRequested = false;
+  }
+
+  receiveTurnControl(control) {
+    if (control.turn_seq !== undefined && control.turn_seq !== this.turnSeq) return;
+    for (const event of control.pending_steer ?? []) {
+      if (event.turn_seq === this.turnSeq && event.seq > this.steerAcked &&
+          event.type === 'turn.steer' && !this.steering.has(event.seq)) {
+        this.steering.set(event.seq, {event: structuredClone(event)});
+      }
+    }
+    if (control.cancel_requested && !this.cancelRequested) {
+      this.cancelRequested = true;
+      this.agent?.cancel({kind: 'user'});
+    }
+  }
+
+  async pendingSteerMessages() {
+    const messages = [];
+    const ids = new Set();
+    for (const input of [...this.steering.values()].sort((a, b) => a.event.seq - b.event.seq)) {
+      if (input.nativeSeq !== undefined) continue;
+      if (!this.backend.decodeSteer) throw new Error('DeepSeek VM steering requires a native message decoder');
+      input.decoding ??= Promise.resolve(this.backend.decodeSteer(input.event)).then(message => structuredClone(message));
+      input.message = await input.decoding;
+      if (input.message?.role !== 'user' || !input.message.id || input.message.source?.kind !== 'user') {
+        throw new TypeError('Expected a DeepSeek user message for steering');
+      }
+      if (ids.has(input.message.id)) throw new TypeError('Expected distinct DeepSeek steering message IDs');
+      ids.add(input.message.id);
+      messages.push(input.message);
+    }
+    return messages;
+  }
+
+  steerAck(end) {
+    if (this.steering.size === 0) return undefined;
+    // The native events and ACK go into the same append transaction.
+    const targets = [...this.steering.values()].sort((a, b) => a.event.seq - b.event.seq);
+    for (const event of this.state.log.slice(this.state.acked, end)) {
+      if (event.type !== 'user/message' || event.surfaceOp !== 'append') continue;
+      const target = targets.find(input => isDeepStrictEqual(input.message, event.data));
+      if (target) target.nativeSeq ??= event.seq;
+    }
+    const firstPending = targets.findIndex(input => !(input.nativeSeq < end));
+    const applied = firstPending === -1 ? targets : targets.slice(0, firstPending);
+    if (targets.slice(applied.length).some(input => input.nativeSeq < end)) {
+      throw new SessionPersistenceCorruptionError('DeepSeek steering prefix is not durable in order');
+    }
+    if (applied.length > 0) {
+      return {turn_seq: this.turnSeq, up_to_seq: applied.at(-1).event.seq, count: applied.length};
+    }
+  }
+
+  confirmSteer(ack) {
+    if (!ack) return;
+    this.steerAcked = ack.up_to_seq;
+    for (const seq of this.steering.keys()) {
+      if (seq <= this.steerAcked) this.steering.delete(seq);
+    }
   }
 
   route(event) {
@@ -110,6 +171,8 @@ class CompactSessionHandle {
     this.lost = true;
     this.state = undefined;
     this.routed.length = 0;
+    this.steering.clear();
+    this.agent = undefined;
     clearInterval(this.timer);
     if (this.backend.writers.get(this.id) === this) this.backend.writers.delete(this.id);
   }
@@ -155,7 +218,10 @@ class CompactSessionHandle {
 }
 
 export default class CompactSessionPersistence extends SessionPersistence {
-  constructor(ctx, {client, prefix = 'dsh-', ttlMs = 30000, heartbeat = true, effectTools = [], gateway}) {
+  constructor(ctx, {
+    client, prefix = 'dsh-', ttlMs = 30000, heartbeat = true, effectTools = [], gateway,
+    preclaimedTurn, decodeSteer,
+  }) {
     super(ctx);
     this.client = client;
     this.prefix = prefix;
@@ -163,13 +229,56 @@ export default class CompactSessionPersistence extends SessionPersistence {
     this.heartbeat = heartbeat;
     this.effectTools = new Set(effectTools);
     this.gateway = gateway;
+    this.preclaimedTurn = preclaimedTurn;
+    this.decodeSteer = decodeSteer;
     this.writers = new Map();
     ctx.on('session/event', (session, event) => this.writers.get(session.id)?.route(event));
+    ctx.on('agent/pre-step', async ({agent, signal}, next) => {
+      const handle = this.writers.get(agent.session.id);
+      if (handle?.turnSeq === undefined) return next();
+      handle.agent = agent;
+      if (handle.cancelRequested) agent.cancel({kind: 'user'});
+      signal.throwIfAborted();
+      const decision = await next();
+      if (decision.kind !== 'enter') return decision;
+      const steered = await handle.pendingSteerMessages();
+      signal.throwIfAborted();
+      const admitted = new Set(decision.messages.map(message => message.id));
+      return {...decision, messages: [...decision.messages, ...steered.filter(message => !admitted.has(message.id))]};
+    });
+    ctx.on('agent/turn-stopping', async ({agent, signal}) => {
+      const handle = this.writers.get(agent.session.id);
+      if (handle?.turnSeq === undefined) return;
+      await handle.flush();
+      const [message] = await handle.pendingSteerMessages();
+      signal.throwIfAborted();
+      if (message) agent.steer(message);
+    });
     ctx.on('session/flush', session => this.writers.get(session.id)?.flush());
     ctx.on('session/disposed', session => this.writers.get(session.id)?.close().catch(error => {
       ctx.logger.warn(`DeepSeek journal close failed: ${error.name}`);
     }));
     ctx.effect(() => () => this.dispose());
+  }
+
+  acceptTurnControl(id, turnSeq, control) {
+    const handle = this.writers.get(id);
+    if (handle?.turnSeq !== undefined && handle.turnSeq === turnSeq && !handle.closed && !handle.lost) {
+      handle.receiveTurnControl(control);
+    }
+  }
+
+  async resumePendingSteer(id, turnSeq) {
+    const handle = this.writers.get(id);
+    const agent = handle?.agent;
+    const mayResume = () => handle?.turnSeq !== undefined && handle.turnSeq === turnSeq &&
+      !handle.closed && !handle.lost &&
+      !handle.cancelRequested && agent?.status === 'idle';
+    if (!mayResume()) return false;
+    const [message] = await handle.pendingSteerMessages();
+    if (!message || !mayResume()) return false;
+    agent.steer(message);
+    return true;
   }
 
   sessionId(id) {
@@ -316,6 +425,8 @@ export default class CompactSessionPersistence extends SessionPersistence {
     const handle = new CompactSessionHandle(this, state, 'write');
     handle.epoch = lease.epoch;
     handle.preclaimed = preclaimed;
+    handle.turnSeq = preclaimed ? lease.turn_seq : undefined;
+    handle.steerAcked = handle.turnSeq;
     this.writers.set(state.id, handle);
     if (this.heartbeat && !preclaimed) {
       handle.timer = setInterval(() => handle.serialize(() => this.renew(handle)).catch(error => {
@@ -338,7 +449,7 @@ export default class CompactSessionPersistence extends SessionPersistence {
       throw new TypeError('isSeeded and inheritedEventCount must agree');
     }
     if (this.writers.has(id)) throw new SessionAlreadyExistsError(id);
-    const preclaimed = options?.preclaimedTurn;
+    const preclaimed = options?.preclaimedTurn ?? this.preclaimedTurn?.(id);
     let head = 0;
     let lease;
     if (preclaimed) {
@@ -369,7 +480,7 @@ export default class CompactSessionPersistence extends SessionPersistence {
   async open(id, access, options) {
     options?.signal?.throwIfAborted();
     const writer = this.writers.get(id);
-    const preclaimed = options?.preclaimedTurn;
+    const preclaimed = options?.preclaimedTurn ?? (access === 'write' ? this.preclaimedTurn?.(id) : undefined);
     if (access === 'read') {
       if (preclaimed) throw new TypeError('Preclaimed turns require write access');
       const shared = writer?.state?.log ? writer.state : undefined;
@@ -410,7 +521,8 @@ export default class CompactSessionPersistence extends SessionPersistence {
     }});
   }
 
-  async makeBatch(state, epoch) {
+  async makeBatch(handle) {
+    const {state, epoch, turnSeq} = handle;
     const storePayload = value => storeJournalJSON(this.client, this.path(state.id), epoch, value);
     const rows = !state.headerCommitted ? [row('dsh:header', HEADER, 'system', await storePayload({
       header: state.header, inheritedEventCount: state.inheritedEventCount,
@@ -436,6 +548,11 @@ export default class CompactSessionPersistence extends SessionPersistence {
     const catalog = {native_key: state.id, summary_metadata: summary};
     const request = {lease_epoch: epoch, key: `dsh:append:${state.head}`,
       expected_seq: state.head, events: rows, catalog};
+    if (turnSeq !== undefined) {
+      request.turn_seq = turnSeq;
+      const ack = handle.steerAck(end);
+      if (ack) request.steer_ack = ack;
+    }
     const intents = [];
     const outcomes = [];
     for (const event of state.log.slice(state.acked, end)) {
@@ -455,6 +572,7 @@ export default class CompactSessionPersistence extends SessionPersistence {
       if (previous.status !== 'DISPATCHED') continue;
       const unknown = event.data.error?.code === TOOL_OUTCOME_UNKNOWN;
       outcomes.push({call_id: key, gateway_operation_id: previous.gateway_operation_id,
+        ...(turnSeq !== undefined && {turn_seq: turnSeq}),
         status: unknown ? 'OUTCOME_UNKNOWN' : 'COMPLETED',
         ...(!unknown && {result: await storePayload(event.data.message)})});
     }
@@ -463,14 +581,49 @@ export default class CompactSessionPersistence extends SessionPersistence {
     return {end, request};
   }
 
+  async refreshControlHead(handle) {
+    // Only ingress rows may race our native append. A terminal or native row
+    // here means another writer progressed and this batch must remain fenced.
+    const state = handle.state;
+    let cursor = state.head;
+    let page = await this.getPage(handle.id, cursor, 100);
+    const head = page.head_seq;
+    while (cursor < head) {
+      const previous = cursor;
+      for (const event of page.events ?? []) {
+        if (event.seq > head) break;
+        const ingress = (event.type === 'turn.steer' && event.turn_seq === handle.turnSeq) ||
+          (event.type === 'turn.followup' && !event.turn_seq);
+        if (event.seq !== cursor + 1 || !ingress || !isTurnControl(event)) return false;
+        cursor = event.seq;
+      }
+      if (cursor === previous) return false;
+      if (cursor < head) page = await this.getPage(handle.id, cursor, 100);
+    }
+    if (head <= state.head) return false;
+    state.head = head;
+    return true;
+  }
+
   async publish(handle) {
     const state = handle.state;
     if (!handle.preclaimed) await this.renew(handle);
+    let rebased = false;
     while (state.pending || !state.headerCommitted || state.log.length > state.acked) {
-      state.pending ??= await this.makeBatch(state, handle.epoch);
+      state.pending ??= await this.makeBatch(handle);
       const {request, end} = state.pending;
-      const receipt = await this.client.request('POST', this.path(state.id) + '/events:append',
-        {body: request});
+      let receipt;
+      try {
+        receipt = await this.client.request('POST', this.path(state.id) + '/events:append', {body: request});
+      } catch (error) {
+        if (!rebased && handle.turnSeq !== undefined && error.code === 'CONFLICT' &&
+            await this.refreshControlHead(handle)) {
+          rebased = true;
+          state.pending = undefined;
+          continue;
+        }
+        throw error;
+      }
       if (receipt.head_seq !== state.head + request.events.length || receipt.first_seq !== state.head + 1) {
         throw new SessionPersistenceCorruptionError('Invalid State API append receipt');
       }
@@ -478,6 +631,9 @@ export default class CompactSessionPersistence extends SessionPersistence {
       state.headerCommitted = true;
       state.acked = end;
       state.pending = undefined;
+      handle.confirmSteer(request.steer_ack);
+      if (receipt.control && handle.turnSeq !== undefined) handle.receiveTurnControl(receipt.control);
+      rebased = false;
     }
   }
 
@@ -497,7 +653,7 @@ export default class CompactSessionPersistence extends SessionPersistence {
           !this.effectTools.has(call.data.name)) continue;
       const key = this.toolKey(state, call);
       const digest = createHash('sha256').update(call.data.arguments).digest();
-      await beginStandaloneTool(this.client, this.path(handle.id), handle.epoch, key, call.data.name, digest);
+      await beginStandaloneTool(this.client, this.path(handle.id), handle.epoch, key, call.data.name, digest, handle.turnSeq);
       throw Object.assign(new Error('DeepSeek tool requires reconciliation'), {code: TOOL_OUTCOME_UNKNOWN});
     }
   }
@@ -541,6 +697,7 @@ export default class CompactSessionPersistence extends SessionPersistence {
     return await this.client.request('POST', API + '/aux:mutate', {body: {
       session_id: this.sessionId(handle.id), lease_epoch: handle.epoch, transition: {
         call_id: key, gateway_operation_id: key, status: 'DISPATCHED',
+        ...(handle.turnSeq !== undefined && {turn_seq: handle.turnSeq}),
       },
     }});
   }
@@ -558,7 +715,7 @@ export default class CompactSessionPersistence extends SessionPersistence {
       const key = this.toolKey(handle.state, call);
       if (!this.gateway) {
         const digest = createHash('sha256').update(call.data.arguments).digest();
-        const decision = await beginStandaloneTool(this.client, this.path(id), handle.epoch, key, call.data.name, digest);
+        const decision = await beginStandaloneTool(this.client, this.path(id), handle.epoch, key, call.data.name, digest, handle.turnSeq);
         if (!decision.can_execute) {
           throw Object.assign(new Error('DeepSeek tool requires reconciliation'), {code: TOOL_OUTCOME_UNKNOWN});
         }
@@ -581,6 +738,8 @@ export default class CompactSessionPersistence extends SessionPersistence {
       if (this.writers.get(handle.id) === handle) this.writers.delete(handle.id);
       handle.state = undefined;
       handle.routed.length = 0;
+      handle.steering.clear();
+      handle.agent = undefined;
     }
   }
 

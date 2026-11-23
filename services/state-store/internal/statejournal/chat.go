@@ -63,7 +63,7 @@ func chatEventID(namespace, checkpointID string) string {
 }
 
 func appendChatDelta(ctx context.Context, tx pgx.Tx, scope contracts.Scope, session string,
-	cp Checkpoint, head int64, eventID string, raw []byte) error {
+	cp Checkpoint, head int64, eventID string, raw []byte, turnSeq int64) error {
 	var parent string
 	if cp.ParentID != "" {
 		err := tx.QueryRow(ctx, `
@@ -75,7 +75,7 @@ func appendChatDelta(ctx context.Context, tx pgx.Tx, scope contracts.Scope, sess
 		}
 	}
 	if err := insertEvent(ctx, tx, scope.Tenant, session, head+1, EventInput{
-		ID: eventID, ParentID: parent, Type: chatPatchType, Role: "system", Codec: "json",
+		ID: eventID, ParentID: parent, TurnSeq: turnSeq, Type: chatPatchType, Role: "system", Codec: "json",
 		Payload: Payload{Inline: raw},
 	}, nil, nil, nil); err != nil {
 		return err

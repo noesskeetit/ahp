@@ -62,7 +62,11 @@ func (s *Store) MutateToolIntent(ctx context.Context, scope contracts.Scope, ses
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := lockSession(ctx, tx, scope, session, lease); err != nil {
+	_, turn, err := lockSessionState(ctx, tx, scope, session, lease)
+	if err != nil {
+		return err
+	}
+	if err := turn.validate(transition.TurnSeq, nil); err != nil {
 		return err
 	}
 	if transition.Result != nil {

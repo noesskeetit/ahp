@@ -42,10 +42,10 @@ func TestDotsFIFOHTTPVerifiedTask(t *testing.T) {
 	}
 	signer, verifier := keys("identity")
 	proofSigner, proofVerifier := keys("state")
-	token := func(task string) string {
+	token := func(task string, extraCapabilities ...string) string {
 		t.Helper()
 		if _, err := ids.CreateRoot(ctx, scope, identity.RootRequest{Task: task, Context: "conversation-" + scope.Tenant, Deployment: scope.Deployment,
-			Capabilities: []string{"state"}, TTL: time.Minute}); err != nil {
+			Capabilities: append([]string{"state"}, extraCapabilities...), TTL: time.Minute}); err != nil {
 			t.Fatal(err)
 		}
 		raw, err := ids.MintTask(ctx, scope, task, signer, "ahp", time.Minute)
@@ -159,4 +159,24 @@ func TestDotsFIFOHTTPVerifiedTask(t *testing.T) {
 	if _, err := proofVerifier.VerifyToolLease(want.Proof, claims, req.SessionID, want.Epoch); err != nil {
 		t.Fatalf("lease proof bound to the wrong task or session: %v", err)
 	}
+	t.Run("VM claim requires launch identity and coordinator admission", func(t *testing.T) {
+		coord := token("coord", "state.coordinate")
+		const path = "/v1/state/sessions:enqueue"
+		input := journal.EnqueueRequest{SessionID: "managed", Harness: "go", FormatVersion: 1, Key: "turn",
+			ExecutionMode: journal.ExecutionVMManaged, Input: Payload{Inline: []byte(`{}`)}}
+		post(httpPlain, path, a, input, http.StatusForbidden, nil)
+		var receipt journal.EnqueueReceipt
+		post(httpPlain, path, coord, input, http.StatusOK, &receipt)
+		id := journal.DeterministicExecutionID(scope, input.SessionID, receipt.HeadSeq, 1)
+		claim := journal.VMTurnClaimRequest{TurnSeq: receipt.HeadSeq, Generation: 1, ExecutionID: id}
+		claimPath := "/v1/state/sessions/managed/vm:claim"
+		post(httpPlain, claimPath, a, claim, http.StatusForbidden, nil)
+		post(httpPlain, claimPath, token("unrelated-vm", "state.vm_claim"), claim, http.StatusForbidden, nil)
+		var turn journal.TurnLease
+		post(httpPlain, claimPath, token(id, "state.vm_claim"), claim, http.StatusOK, &turn)
+		if turn.Worker != id || turn.InputSeq != receipt.HeadSeq || turn.Epoch != 1 {
+			t.Fatalf("unexpected VM claim: %+v", turn)
+		}
+	})
+
 }

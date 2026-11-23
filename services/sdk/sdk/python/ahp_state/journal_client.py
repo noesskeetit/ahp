@@ -19,9 +19,17 @@ from ahp_state.sync import invoke_sync
 _API = "/v1/state"
 
 
+def _receipt_for_turn(receipt, turn_seq):
+    control = (receipt or {}).get("control")
+    if control is None or control.get("turn_seq", turn_seq) == turn_seq:
+        return receipt
+    return {key: value for key, value in receipt.items() if key != "control"}
+
+
 @dataclass
 class _LeaseState:
     value: dict | None = None
+    turn_seq: int | None = None
     guard: StandaloneToolGuard | None = None
     fenced: bool = False
     on_end: set = field(default_factory=set)
@@ -51,6 +59,11 @@ class AHPJournalClient:
             raise StateValidationError("INVALID_ARGUMENT", "open the journal with a write lease first")
         return self._lease.value["epoch"]
 
+    @property
+    def turn_seq(self):
+        """The current VM-managed turn, or None for an unbound or pull lease."""
+        return self._lease.turn_seq
+
     def _check_can_acquire(self):
         if self._lease.value is not None or self.fenced:
             raise StateValidationError("INVALID_ARGUMENT", "this client already has or has lost its write lease")
@@ -77,6 +90,7 @@ class AHPJournalClient:
         if self._lease.guard is not None:
             self._lease.guard.fenced = True
         self._lease.guard = self._lease.value = None
+        self._lease.turn_seq = None
         for ref in self._lease.on_end:
             if (callback := ref()) is not None:
                 callback()
@@ -101,17 +115,36 @@ class AHPJournalClient:
             "format_version": self.format_version, "ttl_ms": ttl_ms,
         }))
 
-    async def enqueue_turn(self, operation_key, input_payload):
-        return await self._client.request_state("POST", _API + "/sessions:enqueue", body={
+    async def enqueue_turn(self, operation_key, input_payload, *, execution_mode=None,
+                           delivery_mode=None, target_turn_seq=None):
+        body = {
             "session_id": self.session_id, "harness_type": self.harness_type,
             "format_version": self.format_version, "key": operation_key, "input": input_payload,
-        })
+        }
+        if execution_mode is not None:
+            body["execution_mode"] = execution_mode
+        if delivery_mode is not None:
+            body["delivery_mode"] = delivery_mode
+        if target_turn_seq is not None:
+            body["target_turn_seq"] = target_turn_seq
+        return await self._client.request_state("POST", _API + "/sessions:enqueue", body=body)
 
     async def claim_turn(self, ttl_ms=30000):
         self._check_can_acquire()
         return self._set_lease(await self._client.request_state("POST", _API + "/sessions:claim-turn", body={
             "session_id": self.session_id, "ttl_ms": ttl_ms,
         }))
+
+    async def claim_vm_turn(self, *, turn_seq, generation, execution_id, ttl_ms=30000):
+        self._check_can_acquire()
+        value = await self._client.request_state("POST", self.path + "/vm:claim", body={
+            "turn_seq": turn_seq, "generation": generation, "execution_id": execution_id, "ttl_ms": ttl_ms,
+        })
+        self._lease.turn_seq = turn_seq
+        return self._set_lease(value)
+
+    async def cancel_turn(self, *, turn_seq):
+        return await self._client.request_state("POST", self.path + "/vm:cancel", body={"turn_seq": turn_seq})
 
     async def turn_status(self):
         return await self._client.request_state("GET", self.path)
@@ -138,7 +171,7 @@ class AHPJournalClient:
         updated = await self._mutate(":heartbeat", {"ttl_ms": ttl_ms})
         if self._lease.value is not current or self.fenced:
             raise SessionFencedError("STALE_EPOCH", "lease changed while heartbeat was in flight")
-        return self._set_lease(updated)
+        return self._set_lease(_receipt_for_turn(updated, self.turn_seq))
 
     async def release(self, *, status="IDLE"):
         await self._mutate(":heartbeat", {"release": True, "status": status})
@@ -190,21 +223,48 @@ class AHPJournalClient:
                 if self._lease.value is not None and not self.fenced and self.epoch == epoch:
                     await self.release(status=release_status)
 
-    async def append(self, operation_key, expected_seq, events, **changes):
+    def _turn_fields(self, turn_seq):
+        turn_seq = self.turn_seq if turn_seq is None else turn_seq
+        return {"turn_seq": turn_seq} if turn_seq is not None else {}
+
+    async def append(self, operation_key, expected_seq, events, *, turn_seq=None, steer_ack=None, **changes):
+        """Commit events and, if supplied, ACK the steer included in that commit."""
+        fields = self._turn_fields(turn_seq)
+        epoch = self.epoch
+        if steer_ack is not None:
+            fields["steer_ack"] = steer_ack
         result = await self._mutate("/events:append", {
-            **changes, "key": operation_key, "expected_seq": expected_seq, "events": events,
+            **changes, **fields, "key": operation_key, "expected_seq": expected_seq, "events": events,
         })
-        if changes.get("finish_turn"):
-            self._clear_lease()
-        return result
+        receipt_turn = self.turn_seq
+        if (changes.get("finish_turn") and self._lease.value is not None
+                and self._lease.value["epoch"] == epoch and receipt_turn == fields.get("turn_seq")):
+            control = result.get("control") or {}
+            next_turn = control.get("next_turn")
+            if next_turn is None:
+                self._clear_lease()
+            else:
+                receipt_turn = next_turn["input_seq"]
+                if control.get("turn_seq", receipt_turn) != receipt_turn:
+                    raise StateValidationError("INVALID_ARGUMENT", "followup receipt identifies conflicting turns")
+                if self._lease.guard is not None:
+                    self._lease.guard.fenced = True
+                    self._lease.guard = None
+                self._lease.turn_seq = receipt_turn
+        return _receipt_for_turn(result, receipt_turn)
 
     async def events(self, *, after_seq=0, limit=100, **filters):
         return await self._client.request_state("GET", self.path + "/events", params={
             **filters, "after_seq": after_seq, "limit": limit,
         })
 
-    async def put_checkpoint(self, operation_key, checkpoint, **changes):
-        return await self._mutate("/checkpoints", {**changes, "key": operation_key, "checkpoint": checkpoint})
+    async def put_checkpoint(self, operation_key, checkpoint, *, turn_seq=None, steer_ack=None, **changes):
+        """Commit a snapshot and, if supplied, ACK the steer included in it."""
+        body = {**changes, **self._turn_fields(turn_seq), "key": operation_key, "checkpoint": checkpoint}
+        if steer_ack is not None:
+            body["steer_ack"] = steer_ack
+        result = await self._mutate("/checkpoints", body)
+        return _receipt_for_turn(result, self.turn_seq)
 
     async def checkpoint(self, *, namespace="", checkpoint_id=""):
         return await self._client.request_state(
@@ -222,9 +282,9 @@ class AHPJournalClient:
             params["include_unindexed"] = "true"
         return await self._client.request_state("GET", self.path + "/checkpoints", params=params)
 
-    async def put_writes(self, checkpoint_id, writes, *, namespace=""):
+    async def put_writes(self, checkpoint_id, writes, *, namespace="", turn_seq=None):
         suffix = f"/checkpoints/{quote(checkpoint_id, safe='')}/writes"
-        return await self._mutate(suffix, {"namespace": namespace, "writes": writes})
+        return await self._mutate(suffix, {**self._turn_fields(turn_seq), "namespace": namespace, "writes": writes})
 
     async def get_kv(self, namespace, *, scope_type="session", key="", prefix=False, offset=0, limit=100):
         params = {"session_id": self.session_id, "scope_type": scope_type, "namespace": namespace,
@@ -233,8 +293,8 @@ class AHPJournalClient:
             params["key"] = key
         return await self._client.request_state("GET", _API + "/kv", params=params)
 
-    async def mutate_kv(self, operation_key, changes, *, expected_seq=None, catalog=None):
-        body = {"session_id": self.session_id, "key": operation_key, "kv": changes}
+    async def mutate_kv(self, operation_key, changes, *, expected_seq=None, catalog=None, turn_seq=None):
+        body = {**self._turn_fields(turn_seq), "session_id": self.session_id, "key": operation_key, "kv": changes}
         if expected_seq is not None:
             body["expected_seq"] = expected_seq
         if catalog is not None:
@@ -272,13 +332,13 @@ class AHPJournalClient:
         epoch = self.epoch
         # The guard shares the same fencing signal as heartbeat and mutations.
         if self._lease.guard is None:
-            self._lease.guard = StandaloneToolGuard(self._client, self.path, epoch)
+            self._lease.guard = StandaloneToolGuard(self._client, self.path, epoch, turn_seq=self.turn_seq)
         return self._lease.guard
 
-    async def begin_standalone_tool(self, call_id, name, args_digest):
+    async def begin_standalone_tool(self, call_id, name, args_digest, *, turn_seq=None):
         # Use the current transport, including the invocation's isolated sync
         # transport when this is called via SyncAHPJournalClient.
-        guard = StandaloneToolGuard(self._client, self.path, self.epoch)
+        guard = StandaloneToolGuard(self._client, self.path, self.epoch, **self._turn_fields(turn_seq))
         try:
             return await guard.begin(call_id, name, args_digest)
         except StateAPIError as error:
@@ -298,7 +358,8 @@ class AHPJournalClient:
     async def mutate_tool_intent(self, transition):
         try:
             return await self._client.request_state("POST", _API + "/intents:mutate", body={
-                "session_id": self.session_id, "lease_epoch": self.epoch, "transition": transition,
+                "session_id": self.session_id, "lease_epoch": self.epoch,
+                "transition": {**transition, **self._turn_fields(transition.get("turn_seq"))},
             })
         except StateAPIError as error:
             self._note_error(error)
@@ -334,9 +395,15 @@ class SyncAHPJournalClient:
     def epoch(self):
         return self._journal.epoch
 
+    @property
+    def turn_seq(self):
+        return self._journal.turn_seq
+
     acquire = _sync(AHPJournalClient.acquire)
     enqueue_turn = _sync(AHPJournalClient.enqueue_turn)
     claim_turn = _sync(AHPJournalClient.claim_turn)
+    claim_vm_turn = _sync(AHPJournalClient.claim_vm_turn)
+    cancel_turn = _sync(AHPJournalClient.cancel_turn)
     turn_status = _sync(AHPJournalClient.turn_status)
     inspect = _sync(AHPJournalClient.inspect)
     list_sessions = _sync(AHPJournalClient.list_sessions)

@@ -1,4 +1,4 @@
-import type {CompactJournalClient, TurnLease} from './index.mjs';
+import type {CompactJournalClient, JournalEvent, TurnControlDelta, TurnLease} from './index.mjs';
 
 export interface DeepSeekSessionHeader {
   readonly version: 4;
@@ -21,6 +21,16 @@ export interface DeepSeekSessionEvent {
   readonly sourceEventSeqs?: readonly number[];
 }
 export type ToolGateway = (operation: 'Call' | 'Get' | 'GetResult', body: object) => Promise<unknown>;
+export interface DeepSeekUserMessage {
+  readonly id: string;
+  readonly role: 'user';
+  readonly source: {readonly kind: string};
+  readonly content: readonly unknown[];
+}
+export interface DeepSeekPreclaimedTurn extends Pick<TurnLease, 'session_id' | 'epoch' | 'input_seq' | 'head_seq'> {
+  /** For VM-managed turns, set this to input_seq. */
+  readonly turn_seq?: number;
+}
 export interface DeepSeekPersistenceOptions {
   client: Pick<CompactJournalClient, 'request'>;
   prefix?: string;
@@ -28,6 +38,10 @@ export interface DeepSeekPersistenceOptions {
   heartbeat?: boolean;
   effectTools?: Iterable<string>;
   gateway?: ToolGateway;
+  /** Supplies the host's lease to native AgentLoop create/resume. */
+  preclaimedTurn?: (id: string) => DeepSeekPreclaimedTurn | undefined;
+  /** Decodes the producer's opaque steer payload as a native message with source.kind 'user'. */
+  decodeSteer?: (event: JournalEvent) => DeepSeekUserMessage | Promise<DeepSeekUserMessage>;
 }
 export interface DeepSeekSessionSnapshot<H extends DeepSeekSessionHeader = DeepSeekSessionHeader> {
   readonly header: H;
@@ -38,7 +52,7 @@ export interface DeepSeekSessionSnapshot<H extends DeepSeekSessionHeader = DeepS
 export interface DeepSeekOperationOptions { readonly signal?: AbortSignal }
 export interface DeepSeekOpenOptions extends DeepSeekOperationOptions {
   /** The host owns renewal and terminal disposition of this queued turn. */
-  readonly preclaimedTurn?: Pick<TurnLease, 'session_id' | 'epoch' | 'input_seq' | 'head_seq'>;
+  readonly preclaimedTurn?: DeepSeekPreclaimedTurn;
 }
 export interface DeepSeekCreateOptions extends DeepSeekOpenOptions { readonly inheritedEventCount?: number }
 export type DeepSeekAccess = 'read' | 'write';
@@ -66,6 +80,10 @@ export interface DeepSeekSessionPersistence<
   stat(id: string, options?: DeepSeekOperationOptions): Promise<DeepSeekSessionSnapshot<H> | undefined>;
   list(options?: DeepSeekOperationOptions): Promise<DeepSeekSessionSnapshot<H>[]>;
   dispatchTool(id: string, callId: string): Promise<string>;
+  /** Forward renewal control to the writer for the specific turn. */
+  acceptTurnControl(id: string, turnSeq: number, control: TurnControlDelta): void;
+  /** Wake an idle native driver for pending steer while the same AHP turn is active. */
+  resumePendingSteer(id: string, turnSeq: number): Promise<boolean>;
   flush(): Promise<void>;
   dispose(): Promise<void>;
 }

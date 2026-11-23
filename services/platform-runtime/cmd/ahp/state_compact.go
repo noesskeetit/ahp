@@ -37,6 +37,7 @@ func mountCompactStateRoutes(mux *http.ServeMux, handler http.Handler) {
 		"/v1/state/sessions", "/v1/state/sessions/", "/v1/state/sessions:acquire",
 		"/v1/state/sessions:enqueue", "/v1/state/sessions:claim-turn", "/v1/state/kv",
 		"/v1/state/kv:mutate", "/v1/state/aux:mutate", "/v1/state/intents:mutate",
+		"/internal/v1/state/vm-reconcile",
 	} {
 		mux.Handle(path, handler)
 	}

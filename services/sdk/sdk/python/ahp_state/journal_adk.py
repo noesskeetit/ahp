@@ -22,14 +22,15 @@ from google.genai import types
 
 from ahp_state import wire
 from ahp_state.client import StateAPIError, StateConflictError, StateNotFoundError, StateValidationError
-from ahp_state.journal_client import AHPJournalClient
+from ahp_state.journal_client import AHPJournalClient, _receipt_for_turn
 from ahp_state.journal_payload import decode_payload, encode_payload
-from ahp_state.journal_tools import StandaloneToolGuard
+from ahp_state.journal_tools import StandaloneToolGuard, admission_may_have_committed
 
 API = "/v1/state"
 NAMESPACE = "adk"
 INIT = "adk:session:init"
 EVENT_TYPE = "adk.event"
+TURN_INPUT_CONTROL = {"turn.steer", "turn.followup"}
 
 
 def _json(value):
@@ -56,6 +57,7 @@ def _native_key(item):
 @dataclass
 class _Projection:
     head: int = 0
+    revision: int = 0
     created_at: float = 0
     updated_at: float = 0
     state: dict = field(default_factory=dict)
@@ -63,7 +65,7 @@ class _Projection:
     events: dict = field(default_factory=dict)
 
     def marker(self):
-        return {'head': self.head, 'versions': self.versions}
+        return {"head": self.head, "revision": self.revision, "versions": self.versions}
 
     def remember(self, event):
         self.events[event.id] = event
@@ -87,12 +89,14 @@ class AHPJournalSessionService(BaseSessionService):
     """
 
     def __init__(self, client, *, app_name, user_id, session_id=None, lease_epoch=0,
-                 effect_tools=(), tool_gateway=None):
+                 turn_seq=None, effect_tools=(), tool_gateway=None):
         self.client = client
         self.app_name = app_name
         self.user_id = user_id
         self.session_id = session_id
         self.lease_epoch = 0 if lease_epoch is None else lease_epoch
+        self.turn_seq = turn_seq
+        self.control = None
         self.path = f"{API}/sessions/{quote(session_id, safe='')}" if session_id is not None else ""
         self.lock = asyncio.Lock()
         self._bindings = {}
@@ -106,7 +110,7 @@ class AHPJournalSessionService(BaseSessionService):
                 raise StateValidationError("INVALID_ARGUMENT", "duplicate managed ADK tool")
             self.effect_tools[tool.name] = tool
         self.tool_gateway = tool_gateway
-        self.tool_guard = StandaloneToolGuard(client, self.path, self.lease_epoch)
+        self.tool_guard = StandaloneToolGuard(client, self.path, self.lease_epoch, turn_seq=turn_seq)
         self._receipts = {}
 
     @staticmethod
@@ -131,35 +135,50 @@ class AHPJournalSessionService(BaseSessionService):
             return self
         return self._new_binding(session_id, 0)
 
-    def _new_binding(self, session_id, lease_epoch):
+    def _new_binding(self, session_id, lease_epoch, turn_seq=None):
         return AHPJournalSessionService(
             self.client, app_name=self.app_name, user_id=self.user_id, session_id=session_id,
-            lease_epoch=lease_epoch, effect_tools=self.effect_tools.values(), tool_gateway=self.tool_gateway,
+            lease_epoch=lease_epoch, turn_seq=turn_seq, effect_tools=self.effect_tools.values(),
+            tool_gateway=self.tool_gateway,
         )
 
-    def bind_session(self, session_id, lease_epoch):
-        """Bind a write lease obtained by the host for another ADK session."""
+    def bind_session(self, session_id, lease_epoch, *, turn_seq=None):
+        """Bind the host's lease and, for VM execution, its exact turn."""
         if lease_epoch <= 0:
             raise StateValidationError("INVALID_ARGUMENT", "ADK requires a positive write lease epoch")
         previous = self._bindings.get(session_id)
         if previous is None and session_id == self.session_id:
             previous = self
         if previous is not None:
-            if previous.lease_epoch == lease_epoch and not previous._fenced:
+            if (previous.lease_epoch == lease_epoch and previous.turn_seq == turn_seq
+                    and not previous._fenced):
                 return previous
             previous._invalidate()
-        binding = self._new_binding(session_id, lease_epoch)
+        binding = self._new_binding(session_id, lease_epoch, turn_seq)
         self._bindings[session_id] = binding
         return binding
 
-    def _invalidate(self):
+    def _invalidate(self, *, preserve_control=False):
         self._projection = None
         self._fenced = True
         self.tool_guard.fenced = True
         self._receipts.clear()
+        if not preserve_control:
+            self.control = None
 
     def _owns_lease(self):
         return self.lease_epoch > 0 and not self._fenced and not self.tool_guard.fenced
+
+    def _marker(self, projection):
+        return {**projection.marker(), "turn_seq": self.turn_seq}
+
+    def _session_marker(self, session):
+        if not session._storage_update_marker:
+            raise StaleSessionError("ADK session has no journal revision")
+        marker = json.loads(session._storage_update_marker)
+        if marker.get("turn_seq") != self.turn_seq:
+            raise StaleSessionError("ADK session belongs to another turn")
+        return marker
 
     async def _payload(self, value, *, allow_spill=True):
         return await encode_payload(
@@ -208,6 +227,8 @@ class AHPJournalSessionService(BaseSessionService):
                     if row["seq"] != after + 1:
                         raise StateValidationError("INVALID_ARGUMENT", "ADK journal history is incomplete")
                     after = row["seq"]
+                    if self.turn_seq is None or row["type"] not in TURN_INPUT_CONTROL:
+                        projection.revision = after
                     if row["id"] == INIT:
                         initialized = await self._value(row["payload"])
                         projection.created_at = initialized["created_at"]
@@ -218,7 +239,8 @@ class AHPJournalSessionService(BaseSessionService):
                         event = Event.model_validate(await self._value(row["payload"]))
                         projection.remember(event)
                     elif not projection.created_at and not (
-                        row["type"] == "turn.input" and row["role"] == "user" and row["codec"] == "json"
+                        row["type"] in TURN_INPUT_CONTROL or row["type"] == "turn.completed"
+                        or (row["type"] == "turn.input" and row["role"] == "user" and row["codec"] == "json")
                     ):
                         raise StateValidationError("INVALID_ARGUMENT", "ADK session has unexpected records before initialization")
                 if after < head:
@@ -256,7 +278,7 @@ class AHPJournalSessionService(BaseSessionService):
             state={**deepcopy(projection.state), **(transient or {})},
             events=[event.model_copy(deep=True) for event in events], last_update_time=projection.updated_at,
         )
-        session._storage_update_marker = _json(projection.marker()).decode()
+        session._storage_update_marker = _json(self._marker(projection)).decode()
         return session
 
     def _catalog(self, *, event_count, updated_at):
@@ -267,7 +289,7 @@ class AHPJournalSessionService(BaseSessionService):
         }
 
     async def _append(self, *, event_id, kind, role, document, delta, marker,
-                      catalog, intents=(), outcomes=(), finish_turn=None):
+                      catalog, intents=(), outcomes=(), finish_turn=None, steer_ack=None):
         changes = []
         for key, value in delta.items():
             scope, native_key = _scope_key(key)
@@ -291,7 +313,39 @@ class AHPJournalSessionService(BaseSessionService):
             body["tool_outcomes"] = outcomes
         if finish_turn is not None:
             body["finish_turn"] = finish_turn
-        return await self.client.request_state("POST", self.path + "/events:append", body=body)
+        if self.turn_seq is not None:
+            body["turn_seq"] = self.turn_seq
+        if steer_ack is not None:
+            body["steer_ack"] = steer_ack
+        path = self.path + "/events:append"
+
+        async def commit(request):
+            try:
+                return await self.client.request_state("POST", path, body=request)
+            except (StateAPIError, json.JSONDecodeError) as exc:
+                if (self.turn_seq is None or (steer_ack is None and not finish_turn)
+                        or not admission_may_have_committed(exc)):
+                    raise
+                # Replay the exact operation to recover its atomic ACK or
+                # followup receipt after an ambiguous response.
+                return await self.client.request_state("POST", path, body=request)
+
+        try:
+            receipt = await commit(body)
+        except StateAPIError as exc:
+            if self.turn_seq is None or exc.code != "CONFLICT" or exc.message != "session head has changed":
+                raise
+            # The coordinator may have appended steer or followup while ADK
+            # was building the event. Rebase only over those control records.
+            latest = await self._read()
+            if not self._owns_lease() or latest is None or latest.revision != marker["revision"]:
+                raise
+            receipt = await commit({**body, "expected_seq": latest.head})
+        control = receipt.get("control") or {}
+        next_turn = control.get("next_turn") if finish_turn else None
+        receipt_turn = next_turn["input_seq"] if next_turn is not None else self.turn_seq
+        self.control = _receipt_for_turn(receipt, receipt_turn).get("control") if self._owns_lease() else None
+        return receipt
 
     def _tool_key(self, invocation, call_id):
         if not invocation or not call_id:
@@ -309,9 +363,12 @@ class AHPJournalSessionService(BaseSessionService):
         })
 
     async def _mark_dispatched(self, key):
+        transition = {"call_id": key, "gateway_operation_id": key, "status": "DISPATCHED"}
+        if self.turn_seq is not None:
+            transition["turn_seq"] = self.turn_seq
         await self.client.request_state("POST", API + "/aux:mutate", body={
             "session_id": self.session_id, "lease_epoch": self.lease_epoch,
-            "transition": {"call_id": key, "gateway_operation_id": key, "status": "DISPATCHED"},
+            "transition": transition,
         })
 
     @staticmethod
@@ -376,6 +433,8 @@ class AHPJournalSessionService(BaseSessionService):
         self._validate_tool_registration(tool)
         if not self._owns_lease():
             raise StaleSessionError("ADK managed tool requires a current write lease")
+        if self.turn_seq is not None:
+            self._session_marker(session=tool_context.session)
         key = self._tool_key(tool_context.invocation_id, tool_context.function_call_id)
         if self.tool_gateway is None:
             decision = await self.tool_guard.begin(key, tool.name, self._args_digest(args))
@@ -521,27 +580,32 @@ class AHPJournalSessionService(BaseSessionService):
             else:
                 projection.state[key] = deepcopy(value)
             projection.versions[key] = projection.versions.get(key, 0) + 1
-        projection.head = head
+        projection.head = projection.revision = head
         self._remember(projection)
 
-    @staticmethod
-    def _refresh(target, projection, transient):
+    def _refresh(self, target, projection, transient):
         local = {key: value for key, value in target.state.items() if _ephemeral(key)}
         target.state = {**deepcopy(projection.state), **local, **transient}
         target.last_update_time = projection.updated_at
-        target._storage_update_marker = _json(projection.marker()).decode()
+        target._storage_update_marker = _json(self._marker(projection)).decode()
 
-    async def append_event(self, session, event, *, finish_turn=None):
+    async def append_event(self, session, event, *, finish_turn=None, steer_ack=None):
+        """Supply steer_ack with the durable native user event containing the applied input."""
         self._verify(session.app_name, session.user_id)
-        return await self._target(session.id)._append_event(session, event, finish_turn=finish_turn)
+        return await self._target(session.id)._append_event(session, event, finish_turn=finish_turn, steer_ack=steer_ack)
 
-    async def _append_event(self, session, event, *, finish_turn):
+    async def _append_event(self, session, event, *, finish_turn, steer_ack):
+        if steer_ack is not None and (event.partial or event.author != "user" or not (
+            event.content and event.content.parts
+        )):
+            raise StateValidationError("INVALID_ARGUMENT", "steer ACK requires a durable native user input event")
         if event.partial:
             return event
         if not event.id:
             raise StateValidationError("INVALID_ARGUMENT", "ADK event requires a stable identity")
         if not self._owns_lease():
             raise StaleSessionError("ADK session does not have a current write lease")
+        before = self._session_marker(session) if self.turn_seq is not None else None
         stored = event.model_copy(deep=True)
         transient = {key: value for key, value in stored.actions.state_delta.items() if _ephemeral(key)}
         delta = {key: value for key, value in stored.actions.state_delta.items() if not _ephemeral(key)}
@@ -562,10 +626,10 @@ class AHPJournalSessionService(BaseSessionService):
                 session.events = [entry.model_copy(deep=True) for entry in projection.events.values()]
                 self._refresh(session, projection, transient)
                 return prior.model_copy(deep=True)
-            if not session._storage_update_marker:
-                raise StaleSessionError("ADK session has no journal revision")
-            before = json.loads(session._storage_update_marker)
-            if before["head"] != projection.head or any(
+            if before is None:
+                before = self._session_marker(session)
+            position = "revision" if self.turn_seq is not None else "head"
+            if before[position] != getattr(projection, position) or any(
                 before["versions"].get(key, 0) != projection.versions.get(key, 0) for key in delta
             ):
                 raise StaleSessionError("ADK event was built against stale state")
@@ -578,7 +642,7 @@ class AHPJournalSessionService(BaseSessionService):
                     delta=delta, marker=projection.marker(), intents=intents, outcomes=outcomes,
                     catalog=self._catalog(event_count=len(projection.events) + 1,
                                           updated_at=max(projection.updated_at, event.timestamp)),
-                    finish_turn=finish_turn,
+                    finish_turn=finish_turn, steer_ack=steer_ack,
                 )
             except BaseException as exc:
                 # A lost ACK or cancellation may have committed the event.
@@ -596,7 +660,7 @@ class AHPJournalSessionService(BaseSessionService):
             session.events.append(stored.model_copy(deep=True))
             self._refresh(session, projection, transient)
             if finish_turn:
-                self._invalidate()
+                self._invalidate(preserve_control=True)
             return stored.model_copy(deep=True)
 
     async def get_user_state(self, *, app_name, user_id):

@@ -38,6 +38,17 @@ with `heartbeat()`. For queued claims, commit the final native event with
   persists the disposition as `WAITING_INPUT` while retaining the native
   interrupt event for the next lease. Use `release_session()` after a
   completed invocation.
+- In a VM execution, use `claim_vm_turn(turn_seq=..., generation=...,
+  execution_id=...)` with the dispatcher-provided binding. Heartbeat, append
+  and checkpoint responses carry `control`. Use the `input_seq` from a
+  finish receipt's `control.next_turn` for the next invocation. Bind a new
+  LangGraph saver and store or call ADK `bind_session(..., turn_seq=input_seq)`
+  for that invocation. Pass the captured `turn_seq` when constructing the
+  store and making deferred SDK writes.
+  The saver and bound ADK service expose their latest commit as `control`. The host
+  applies pending input to the native checkpoint or ADK user event and
+  supplies `steer_ack` on that same commit. The native Runner callbacks
+  keep their existing signatures and leave steer application to the host.
 - Install the native Hermes runtime in the host separately. The supported
   Hermes source revision is `9dbaa77c4c5b6391510832602f841bc95d390b22`.
   The `hermes` extra installs the SDK without pulling the Hermes runtime.

@@ -36,3 +36,44 @@ test('heartbeat fences and aborts when its lease epoch becomes stale', async () 
   assert.equal(controller.signal.aborted, true);
   assert.equal(controller.signal.reason.code, 'STALE_EPOCH');
 });
+
+test('VM turn methods use the session-specific State API routes', async () => {
+  const client = Object.create(CompactJournalClient.prototype);
+  const calls = [];
+  client.request = async (...args) => {
+    calls.push(args);
+    return {input_seq: 10};
+  };
+  const claim = {turn_seq: 10, generation: 2, execution_id: 'exec-a', ttl_ms: 30000};
+  const requeue = {turn_seq: 10, lease_epoch: 2, execution_id: 'exec-a'};
+  assert.deepEqual(await client.claimVMTurn('vm/session', claim), {input_seq: 10});
+  await client.requeueFencedVMTurn('vm/session', requeue);
+  assert.deepEqual(await client.cancelSession('vm/session', 10), {input_seq: 10});
+  assert.deepEqual(calls, [
+    ['POST', '/v1/state/sessions/vm%2Fsession/vm:claim', {body: claim}],
+    ['POST', '/v1/state/sessions/vm%2Fsession/vm:requeue-fenced', {body: requeue}],
+    ['POST', '/v1/state/sessions/vm%2Fsession/vm:cancel', {body: {turn_seq: 10}}],
+  ]);
+});
+
+test('heartbeat delivers turn control through the existing renewal loop', async () => {
+  const client = Object.create(CompactJournalClient.prototype);
+  const controller = new AbortController();
+  const control = {cancel_requested: true};
+  let polls = 0;
+  let observed;
+  client.heartbeatLease = async () => {
+    polls++;
+    if (polls > 1) throw new Error('turn control was not delivered');
+    return {control};
+  };
+  const heartbeat = client.startHeartbeat('session', 1, {
+    intervalMs: 1, controller, onControl(delta) {
+      observed = delta;
+      controller.abort();
+    },
+  });
+  await heartbeat.done;
+  assert.equal(observed, control);
+  assert.equal(polls, 1);
+});

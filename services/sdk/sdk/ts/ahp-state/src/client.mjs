@@ -132,7 +132,7 @@ export class CompactJournalClient {
     });
   }
 
-  startHeartbeat(id, epoch, {ttlMs = 30000, intervalMs = ttlMs / 3, controller = new AbortController()} = {}) {
+  startHeartbeat(id, epoch, {ttlMs = 30000, intervalMs = ttlMs / 3, controller = new AbortController(), onControl} = {}) {
     if (!Number.isFinite(intervalMs) || intervalMs < 1 || intervalMs >= ttlMs) {
       throw new RangeError('Heartbeat interval must be positive and shorter than the lease TTL');
     }
@@ -147,7 +147,8 @@ export class CompactJournalClient {
       while (!signal.aborted) {
         try {
           await delay(intervalMs, undefined, {signal});
-          await this.heartbeatLease(id, epoch, {ttlMs, signal});
+          const receipt = await this.heartbeatLease(id, epoch, {ttlMs, signal});
+          if (receipt?.control && !signal.aborted) await onControl?.(receipt.control);
           error = undefined;
         } catch (failure) {
           if (signal.aborted) return;
@@ -175,6 +176,18 @@ export class CompactJournalClient {
 
   claimTurn(body = {}) {
     return this.request('POST', sessions + ':claim-turn', {body});
+  }
+
+  claimVMTurn(id, body) {
+    return this.request('POST', sessionPath(id) + '/vm:claim', {body});
+  }
+
+  async requeueFencedVMTurn(id, body) {
+    await this.request('POST', sessionPath(id) + '/vm:requeue-fenced', {body});
+  }
+
+  cancelSession(id, turnSeq) {
+    return this.request('POST', sessionPath(id) + '/vm:cancel', {body: {turn_seq: turnSeq}});
   }
 
   getTurnStatus(id) {

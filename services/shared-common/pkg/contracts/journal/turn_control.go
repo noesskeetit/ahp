@@ -1,0 +1,81 @@
+package journal
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+
+	"github.com/ahp-platform/ahp/pkg/contracts"
+)
+
+const (
+	ExecutionPull      = "worker_pull"
+	ExecutionVMManaged = "vm_managed"
+	DeliveryTurn       = "turn"
+	DeliverySteer      = "steer"
+	DeliveryFollowup   = "followup"
+	MaxFollowups       = 16
+)
+
+type VMTurnClaimRequest struct {
+	TurnSeq         int64  `json:"turn_seq"`
+	Generation      int64  `json:"generation"`
+	ExecutionID     string `json:"execution_id"`
+	TTLMilliseconds int64  `json:"ttl_ms"`
+}
+
+type FenceRequeueRequest struct {
+	TurnSeq     int64  `json:"turn_seq"`
+	Epoch       int64  `json:"lease_epoch"`
+	ExecutionID string `json:"execution_id"`
+}
+
+type VMSession struct {
+	Scope       contracts.Scope `json:"scope"`
+	SessionID   string          `json:"session_id"`
+	TurnSeq     int64           `json:"turn_seq"`
+	Epoch       int64           `json:"lease_epoch"`
+	ExecutionID string          `json:"execution_id,omitempty"`
+	Status      string          `json:"status"`
+	Harness     string          `json:"harness_type"`
+}
+
+type SteerAck struct {
+	TurnSeq int64 `json:"turn_seq"`
+	UpToSeq int64 `json:"up_to_seq"`
+	Count   int   `json:"count"`
+}
+
+type TurnControlDelta struct {
+	TurnSeq         int64      `json:"turn_seq,omitempty"`
+	CancelRequested bool       `json:"cancel_requested,omitempty"`
+	PendingSteer    []Event    `json:"pending_steer,omitempty"`
+	NextTurn        *TurnLease `json:"next_turn,omitempty"`
+}
+
+type TurnCompleted struct {
+	TurnSeq             int64   `json:"turn_seq"`
+	Outcome             string  `json:"outcome"`
+	EndSeq              int64   `json:"end_seq"`
+	NextTurnSeq         int64   `json:"next_turn_seq,omitempty"`
+	CanceledControlSeqs []int64 `json:"canceled_control_seqs,omitempty"`
+}
+
+type CheckpointReceipt struct {
+	ID      string            `json:"checkpoint_id"`
+	Control *TurnControlDelta `json:"control,omitempty"`
+}
+
+func DeterministicExecutionID(scope contracts.Scope, session string, turnSeq, generation int64) string {
+	raw := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%d",
+		scope.Tenant, scope.Deployment, scope.Subject, session, turnSeq, generation)
+	sum := sha256.Sum256([]byte(raw))
+	return "exec-" + hex.EncodeToString(sum[:12])
+}
+
+const SessionSignalChannel = "ahp_rc_sig"
+
+type SessionSignal struct {
+	Scope     contracts.Scope `json:"scope"`
+	SessionID string          `json:"session_id"`
+}

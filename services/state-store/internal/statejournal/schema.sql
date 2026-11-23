@@ -312,3 +312,41 @@ CREATE INDEX IF NOT EXISTS sessions_global_retention_sweeper_idx
 CREATE INDEX IF NOT EXISTS sessions_global_stage_sweeper_idx
     ON ahp_journal.sessions (blob_stage_at, tenant_id)
     WHERE blob_stage_at IS NOT NULL AND NOT legal_hold AND status <> 'DELETED';
+
+ALTER TABLE ahp_journal.sessions
+    ADD COLUMN IF NOT EXISTS execution_mode text NOT NULL DEFAULT 'worker_pull',
+    ADD COLUMN IF NOT EXISTS steer_acked_seq bigint NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS followup_count integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS cancel_requested boolean NOT NULL DEFAULT false;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'ahp_journal.sessions'::regclass AND conname = 'sessions_vm_control_check'
+    ) THEN
+        ALTER TABLE ahp_journal.sessions ADD CONSTRAINT sessions_vm_control_check CHECK (
+            execution_mode IN ('worker_pull','vm_managed')
+            AND (execution_mode <> 'vm_managed' OR NOT dots_fifo)
+            AND steer_acked_seq >= 0 AND followup_count BETWEEN 0 AND 16
+        );
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS sessions_vm_queued_reconcile_idx
+    ON ahp_journal.sessions (queued_at, tenant_id, session_id)
+    WHERE execution_mode='vm_managed' AND status='QUEUED';
+CREATE INDEX IF NOT EXISTS sessions_vm_expired_reconcile_idx
+    ON ahp_journal.sessions (lease_expires_at, tenant_id, session_id)
+    WHERE execution_mode='vm_managed' AND status='ACTIVE' AND turn_input_seq IS NOT NULL;
+
+ALTER TABLE ahp_journal.session_events
+    ADD COLUMN IF NOT EXISTS turn_seq bigint CHECK (turn_seq > 0),
+    ADD COLUMN IF NOT EXISTS admission_receipt jsonb,
+    ADD COLUMN IF NOT EXISTS turn_receipt jsonb;
+CREATE INDEX IF NOT EXISTS session_events_turn_steer_idx
+    ON ahp_journal.session_events (tenant_id, session_id, turn_seq, seq)
+    WHERE event_type='turn.steer' AND is_active;
+CREATE INDEX IF NOT EXISTS session_events_turn_followup_idx
+    ON ahp_journal.session_events (tenant_id, session_id, seq)
+    WHERE event_type='turn.followup' AND turn_seq IS NULL AND is_active;

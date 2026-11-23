@@ -69,19 +69,30 @@ func (s *Store) AppendEvents(ctx context.Context, scope contracts.Scope, session
 		return AppendReceipt{}, err
 	}
 	defer tx.Rollback(ctx)
-	head, lockErr := lockSession(ctx, tx, scope, session, lease)
+	head, turn, lockErr := lockSessionState(ctx, tx, scope, session, lease)
 	if lockErr != nil && (request.FinishTurn == "" || contracts.Code(lockErr) != contracts.ErrStaleEpoch) {
 		return AppendReceipt{}, lockErr
 	}
 	var receipt AppendReceipt
 	var stored []byte
+	var savedControl *journal.TurnControlDelta
 	err = tx.QueryRow(ctx, `
-		SELECT seq, result_head_seq, request_digest FROM ahp_journal.session_events
+		SELECT seq, result_head_seq, request_digest, turn_receipt FROM ahp_journal.session_events
 		WHERE tenant_id=$1 AND session_id=$2 AND operation_key=$3`,
-		scope.Tenant, session, request.Key).Scan(&receipt.FirstSeq, &receipt.HeadSeq, &stored)
+		scope.Tenant, session, request.Key).Scan(&receipt.FirstSeq, &receipt.HeadSeq, &stored, &savedControl)
 	switch {
 	case err == nil && slices.Equal(stored, digest[:]):
-		return receipt, nil
+		receipt.Control = savedControl
+		if savedControl != nil && savedControl.NextTurn != nil &&
+			(lockErr != nil || turn.Seq != savedControl.NextTurn.InputSeq) {
+			// Replaying the result is safe. The old receipt must not grant
+			// permission to run a followup that has moved on.
+			receipt.Control = nil
+		}
+		if receipt.Control == nil && lockErr == nil && request.TurnSeq == turn.Seq {
+			receipt.Control, err = peekControl(ctx, tx, scope, session, turn)
+		}
+		return receipt, err
 	case lockErr != nil:
 		// Only a matching terminal receipt may be read after release.
 		return AppendReceipt{}, lockErr
@@ -93,6 +104,12 @@ func (s *Store) AppendEvents(ctx context.Context, scope contracts.Scope, session
 		return AppendReceipt{}, contracts.NewError(contracts.ErrConflict, "session head has changed")
 	}
 
+	if err := turn.validate(request.TurnSeq, request.SteerAck); err != nil {
+		return AppendReceipt{}, err
+	}
+	if err := applySteerAck(ctx, tx, scope, session, &turn, request.SteerAck); err != nil {
+		return AppendReceipt{}, err
+	}
 	if err := s.pinBlobs(ctx, tx, scope, session, appendBlobs(request)); err != nil {
 		return AppendReceipt{}, err
 	}
@@ -105,6 +122,7 @@ func (s *Store) AppendEvents(ctx context.Context, scope contracts.Scope, session
 	}
 	receipt = AppendReceipt{FirstSeq: head + 1, HeadSeq: head + int64(len(events))}
 	for index, event := range events {
+		event.TurnSeq = request.TurnSeq
 		var key any
 		var hash []byte
 		var result any
@@ -124,7 +142,8 @@ func (s *Store) AppendEvents(ctx context.Context, scope contracts.Scope, session
 			UPDATE ahp_journal.session_events e
 			SET is_active=coalesce(p.is_active,e.is_active), is_compacted=coalesce(p.is_compacted,e.is_compacted)
 			FROM jsonb_to_recordset($3::jsonb) p(seq bigint, is_active boolean, is_compacted boolean)
-			WHERE e.tenant_id=$1 AND e.session_id=$2 AND e.seq=p.seq`, scope.Tenant, session, patches)
+			WHERE e.tenant_id=$1 AND e.session_id=$2 AND e.seq=p.seq
+				  AND (e.turn_seq IS NULL OR e.event_type NOT IN ('turn.completed','turn.steer','turn.followup'))`, scope.Tenant, session, patches)
 		if err != nil {
 			return AppendReceipt{}, err
 		}
@@ -150,7 +169,26 @@ func (s *Store) AppendEvents(ctx context.Context, scope contracts.Scope, session
 		}
 	}
 	if request.FinishTurn != "" {
-		if err := finishTurn(ctx, tx, scope, session, request.FinishTurn); err != nil {
+		if turn.Mode == journal.ExecutionVMManaged {
+			receipt.Control, err = finishManagedTurn(ctx, tx, scope, session, request.FinishTurn, lease, receipt.HeadSeq, turn)
+			receipt.HeadSeq++
+			if err == nil {
+				_, err = tx.Exec(ctx, `UPDATE ahp_journal.session_events
+					SET result_head_seq=$4,turn_receipt=$5 WHERE tenant_id=$1 AND session_id=$2 AND seq=$3`,
+					scope.Tenant, session, receipt.FirstSeq, receipt.HeadSeq, receipt.Control)
+			}
+		} else {
+			err = finishTurn(ctx, tx, scope, session, request.FinishTurn)
+		}
+	} else {
+		receipt.Control, err = peekControl(ctx, tx, scope, session, turn)
+	}
+	if err != nil {
+		return AppendReceipt{}, err
+	}
+
+	if turn.Mode == journal.ExecutionVMManaged {
+		if err := notifyJournal(ctx, tx, scope, session); err != nil {
 			return AppendReceipt{}, err
 		}
 	}
@@ -186,12 +224,12 @@ func insertEvent(ctx context.Context, tx pgx.Tx, tenant, session string, seq int
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO ahp_journal.session_events
 			(tenant_id,session_id,seq,event_uid,parent_entry_id,event_type,role,codec,
-			 inline_payload,blob_ref,operation_key,request_digest,result_head_seq,content_text,otel_trace_id,otel_span_id)
-		SELECT $1,$2,$3,$4,nullif($5,''),$6,$7,$8,$9,$10,$11,$12,$13,nullif($14,''),nullif($15,''),nullif($16,'')
+			 inline_payload,blob_ref,operation_key,request_digest,result_head_seq,content_text,otel_trace_id,otel_span_id,turn_seq)
+		SELECT $1,$2,$3,$4,nullif($5,''),$6,$7,$8,$9,$10,$11,$12,$13,nullif($14,''),nullif($15,''),nullif($16,''),nullif($17::bigint,0)
 		WHERE $5='' OR EXISTS (
 			SELECT 1 FROM ahp_journal.session_events WHERE tenant_id=$1 AND session_id=$2 AND event_uid=$5)`,
 		tenant, session, seq, event.ID, event.ParentID, event.Type, event.Role, event.Codec,
-		event.Payload.Inline, blobValue(event.Payload), key, digest, result, event.Text, traceID, spanID)
+		event.Payload.Inline, blobValue(event.Payload), key, digest, result, event.Text, traceID, spanID, event.TurnSeq)
 	if err == nil && tag.RowsAffected() != 1 {
 		return contracts.NewError(contracts.ErrInvalid, "event parent must be an earlier row in the same session")
 	}
@@ -271,7 +309,7 @@ func validateAppend(session string, lease Lease, shared bool, request AppendRequ
 	}
 	if len(request.Events) == 0 && len(request.KV) == 0 && len(request.EventPatches) == 0 &&
 		len(request.Intents) == 0 && len(request.ToolOutcomes) == 0 && request.Pointers == nil &&
-		request.Catalog == nil && request.FinishTurn == "" {
+		request.Catalog == nil && request.FinishTurn == "" && request.SteerAck == nil {
 		return contracts.NewError(contracts.ErrInvalid, "append batch needs an event or a state mutation")
 	}
 	if request.FinishTurn != "" && request.FinishTurn != SessionIdle && request.FinishTurn != SessionWaitingInput {
@@ -281,6 +319,7 @@ func validateAppend(session string, lease Lease, shared bool, request AppendRequ
 	for _, event := range request.Events {
 		if !validID(event.ID) || event.ID == event.ParentID || !validID(event.Type) ||
 			event.Type == chatPatchType || event.Type == metadataChangeType ||
+			(request.TurnSeq != 0 && (event.Type == "turn.completed" || event.Type == "turn.input" || event.Type == "turn.steer" || event.Type == "turn.followup")) ||
 			!validID(event.Role) || !validID(event.Codec) || !validPayload(event.Payload) ||
 			len(event.Text) > 32<<10 || strings.IndexByte(event.Text, 0) >= 0 ||
 			(event.Text != "" && event.Role != "user" && event.Role != "assistant" && event.Role != "compaction") {
@@ -416,7 +455,7 @@ func (s *Store) filteredEvents(ctx context.Context, scope contracts.Scope, sessi
 		var event Event
 		err := row.Scan(&event.Seq, &event.ID, &event.ParentID, &event.Type, &event.Role,
 			&event.Codec, &event.Payload.Inline, &event.Payload.Blob, &event.Text,
-			&event.Active, &event.Compacted, &event.TraceID, &event.SpanID)
+			&event.Active, &event.Compacted, &event.TraceID, &event.SpanID, &event.TurnSeq)
 		return event, err
 	})
 	if err != nil {
@@ -437,7 +476,7 @@ func (s *Store) filteredEvents(ctx context.Context, scope contracts.Scope, sessi
 func queryEventRows(ctx context.Context, tx pgx.Tx, tenant, session string, after int64, limit int, filters EventFilters) (pgx.Rows, error) {
 	query := `
 		SELECT seq, event_uid, coalesce(parent_entry_id,''), event_type, role, codec, inline_payload, blob_ref,
-			coalesce(content_text,''), is_active, is_compacted, coalesce(otel_trace_id,''), coalesce(otel_span_id,'')
+			coalesce(content_text,''), is_active, is_compacted, coalesce(otel_trace_id,''), coalesce(otel_span_id,''), coalesce(turn_seq,0)
 		FROM ahp_journal.session_events
 		WHERE tenant_id=$1 AND session_id=$2 AND seq>$3`
 	args := []any{tenant, session, after, limit}

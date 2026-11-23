@@ -57,6 +57,7 @@ export interface HeartbeatOptions {
   ttlMs?: number;
   intervalMs?: number;
   controller?: AbortController;
+  onControl?: (control: TurnControlDelta) => void | Promise<void>;
 }
 export interface Heartbeat {
   readonly fenced: boolean;
@@ -65,16 +66,47 @@ export interface Heartbeat {
   readonly done: Promise<void>;
   stop(): Promise<void>;
 }
+export type ExecutionMode = 'worker_pull' | 'vm_managed';
+export type DeliveryMode = 'turn' | 'steer' | 'followup';
 export interface EnqueueTurnRequest {
+  execution_mode?: ExecutionMode;
+  delivery_mode?: DeliveryMode;
+  target_turn_seq?: number;
   session_id: string;
   harness_type: string;
   format_version: number;
   key: string;
   input: JournalPayload;
 }
-export interface EnqueueReceipt { session_id: string; head_seq: number }
+export interface EnqueueReceipt {
+  session_id: string;
+  head_seq: number;
+  session_status?: SessionStatus;
+  accepted_mode?: DeliveryMode;
+  followup_count?: number;
+  lease_epoch?: number;
+}
 export interface ClaimTurnRequest { session_id?: string; ttl_ms?: number }
-export interface TurnLease extends Lease, EnqueueReceipt { input: JournalPayload; input_seq: number }
+export interface VMTurnClaimRequest {
+  turn_seq: number;
+  generation: number;
+  execution_id: string;
+  ttl_ms: number;
+}
+export interface FenceRequeueRequest {
+  turn_seq: number;
+  lease_epoch: number;
+  execution_id: string;
+}
+export interface TurnLease extends Lease { session_id: string; head_seq: number; input: JournalPayload; input_seq: number }
+export interface SteerAck { turn_seq: number; up_to_seq: number; count: number }
+export interface TurnControlDelta {
+  turn_seq?: number;
+  pending_steer?: JournalEvent[];
+  cancel_requested?: boolean;
+  next_turn?: TurnLease;
+}
+export interface HeartbeatReceipt extends Lease { control?: TurnControlDelta }
 export interface TurnStatus { status: SessionStatus; lease_epoch: number; head_seq: number; input_seq?: number }
 export interface SessionQuery { harness?: string; cursor?: string; limit?: number }
 export interface SessionPage { session_ids: string[]; next_cursor?: string }
@@ -116,6 +148,7 @@ export interface CatalogSession<S extends object = JSONObject> {
 export interface CatalogPage<S extends object = JSONObject> { sessions: CatalogSession<S>[]; next_cursor?: string }
 
 export interface EventInput {
+  turn_seq?: number;
   id: string;
   parent_id?: string;
   type: string;
@@ -140,6 +173,7 @@ export interface PreparedIntent {
   idempotency_key: string;
 }
 export interface IntentTransition {
+  turn_seq?: number;
   call_id: string;
   status: 'DISPATCHED' | 'COMPLETED' | 'OUTCOME_UNKNOWN';
   gateway_operation_id: string;
@@ -151,6 +185,7 @@ export interface ToolIntent extends Omit<IntentTransition, 'status'> {
   args_digest: string;
 }
 export interface StandaloneToolRequest {
+  turn_seq?: number;
   lease_epoch: number;
   call_id: string;
   tool_name: string;
@@ -159,6 +194,8 @@ export interface StandaloneToolRequest {
 }
 export interface ToolDecision extends IntentTransition { can_execute: boolean }
 export interface AppendEventsRequest {
+  turn_seq?: number;
+  steer_ack?: SteerAck;
   lease_epoch: number;
   key: string;
   expected_seq: number;
@@ -171,7 +208,7 @@ export interface AppendEventsRequest {
   catalog?: CatalogUpdate;
   event_patches?: readonly EventPatch[];
 }
-export interface AppendReceipt { first_seq: number; head_seq: number }
+export interface AppendReceipt { first_seq: number; head_seq: number; control?: TurnControlDelta }
 export interface EventsQuery {
   after_seq?: number;
   limit?: number;
@@ -219,6 +256,8 @@ export interface CheckpointListQuery {
 }
 export interface CheckpointPage { checkpoint_ids: string[]; checkpoint_tuples?: CheckpointTuple[] }
 export interface PutCheckpointRequest {
+  turn_seq?: number;
+  steer_ack?: SteerAck;
   lease_epoch: number;
   key: string;
   checkpoint: Checkpoint;
@@ -227,7 +266,13 @@ export interface PutCheckpointRequest {
   tool_outcomes?: readonly IntentTransition[];
   chat?: ChatDelta;
 }
-export interface PutWritesRequest { lease_epoch: number; namespace: string; writes: readonly PendingWrite[] }
+export interface CheckpointReceipt { checkpoint_id: string; control?: TurnControlDelta }
+export interface PutWritesRequest {
+  lease_epoch: number;
+  turn_seq?: number;
+  namespace: string;
+  writes: readonly PendingWrite[];
+}
 export interface ChatMessage { id: string; role: string; content: JSONValue }
 export interface ChatDelta { upserts?: readonly ChatMessage[]; remove?: readonly string[]; order?: readonly string[] }
 export interface ChatHistory { checkpoint_id: string; messages: ChatMessage[] }
@@ -271,18 +316,21 @@ export class CompactJournalClient {
   requestTool<T = unknown>(operation: 'Call' | 'Get' | 'GetResult' | 'FenceAndLookup', body: object): Promise<T>;
   acquireSession(body: {session_id: string; read_only: true}): Promise<ResumeState>;
   acquireSession(body: AcquireSessionRequest): Promise<Lease & ResumeState>;
-  heartbeatLease(id: string, epoch: number, options?: {ttlMs?: number; signal?: AbortSignal}): Promise<Lease>;
+  heartbeatLease(id: string, epoch: number, options?: {ttlMs?: number; signal?: AbortSignal}): Promise<HeartbeatReceipt>;
   releaseLease(id: string, epoch: number, status?: ReleaseStatus): Promise<void>;
   startHeartbeat(id: string, epoch: number, options?: HeartbeatOptions): Heartbeat;
   enqueueTurn(body: EnqueueTurnRequest): Promise<EnqueueReceipt>;
   claimTurn(body?: ClaimTurnRequest): Promise<TurnLease>;
+  claimVMTurn(id: string, body: VMTurnClaimRequest): Promise<TurnLease>;
+  requeueFencedVMTurn(id: string, body: FenceRequeueRequest): Promise<void>;
+  cancelSession(id: string, turnSeq?: number): Promise<TurnStatus>;
   getTurnStatus(id: string): Promise<TurnStatus>;
   inspectSession(id: string): Promise<ResumeState>;
   listSessions(query?: SessionQuery): Promise<SessionPage>;
   listCatalog<S extends object = JSONObject>(query: CatalogQuery): Promise<CatalogPage<S>>;
   appendEvents(id: string, body: AppendEventsRequest): Promise<AppendReceipt>;
   getEvents(id: string, query?: EventsQuery): Promise<EventPage>;
-  putCheckpoint(id: string, body: PutCheckpointRequest): Promise<{checkpoint_id: string}>;
+  putCheckpoint(id: string, body: PutCheckpointRequest): Promise<CheckpointReceipt>;
   getCheckpoint(id: string, query?: CheckpointQuery): Promise<CheckpointTuple>;
   listCheckpoints(id: string, query: CheckpointListQuery & {include_tuples: true}):
     Promise<CheckpointPage & {checkpoint_tuples: CheckpointTuple[]}>;
@@ -304,4 +352,4 @@ export class CompactJournalClient {
 export function storeJournalJSON(client: CompactJournalClient, path: string, epoch: number, value: unknown): Promise<JournalPayload>;
 export function loadJournalJSON<T = unknown>(client: CompactJournalClient, path: string, value: JournalPayload): Promise<T>;
 export function beginStandaloneTool(client: CompactJournalClient, path: string, epoch: number, callId: string,
-                                    tool: string, argsDigest: Uint8Array): Promise<ToolDecision>;
+                                    tool: string, argsDigest: Uint8Array, turnSeq?: number): Promise<ToolDecision>;

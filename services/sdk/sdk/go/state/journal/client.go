@@ -45,6 +45,7 @@ func New(config Config) (*Client, error) {
 }
 
 type SessionLease struct {
+	Control *TurnControlDelta `json:"control,omitempty"`
 	Lease
 	ResumeState
 	ToolLeaseProof string `json:"tool_lease_proof,omitempty"`
@@ -87,6 +88,10 @@ func (c *Client) ReleaseLeaseTo(ctx context.Context, session string, epoch int64
 // context for lease-bound work and call stop before releasing the lease.
 // A failed renewal cancels that context with the error as its cause.
 func (c *Client) RunHeartbeat(ctx context.Context, session string, epoch int64, ttl time.Duration) (context.Context, context.CancelFunc) {
+	return c.RunHeartbeatWithControl(ctx, session, epoch, ttl, nil)
+}
+
+func (c *Client) RunHeartbeatWithControl(ctx context.Context, session string, epoch int64, ttl time.Duration, onControl func(TurnControlDelta)) (context.Context, context.CancelFunc) {
 	leaseCtx, cancel := context.WithCancelCause(ctx)
 	stop := func() { cancel(context.Canceled) }
 	if ttl.Milliseconds() < 1 {
@@ -102,11 +107,14 @@ func (c *Client) RunHeartbeat(ctx context.Context, session string, epoch int64, 
 				return
 			case <-timer.C:
 				renewalContext, end := context.WithTimeout(leaseCtx, ttl/3)
-				_, err := c.HeartbeatLease(renewalContext, session, epoch, ttl)
+				renewed, err := c.HeartbeatLease(renewalContext, session, epoch, ttl)
 				end()
 				if err != nil {
 					cancel(err)
 					return
+				}
+				if onControl != nil && renewed.Control != nil {
+					onControl(*renewed.Control)
 				}
 			}
 		}
@@ -218,9 +226,12 @@ func (c *Client) GetEvents(ctx context.Context, session string, afterSeq int64, 
 }
 
 func (c *Client) PutCheckpoint(ctx context.Context, session string, epoch int64, checkpoint CheckpointCommit) (string, error) {
-	var result struct {
-		ID string `json:"checkpoint_id"`
-	}
+	result, err := c.CommitCheckpoint(ctx, session, epoch, checkpoint)
+	return result.ID, err
+}
+
+func (c *Client) CommitCheckpoint(ctx context.Context, session string, epoch int64, checkpoint CheckpointCommit) (CheckpointReceipt, error) {
+	var result CheckpointReceipt
 	request := struct {
 		Epoch int64 `json:"lease_epoch"`
 		CheckpointCommit
@@ -229,7 +240,7 @@ func (c *Client) PutCheckpoint(ctx context.Context, session string, epoch int64,
 	if err == nil && result.ID == "" {
 		err = contracts.NewError(contracts.ErrInvalid, "missing checkpoint receipt ID")
 	}
-	return result.ID, err
+	return result, err
 }
 
 func (c *Client) GetCheckpoint(ctx context.Context, session, namespace, id string) (CheckpointTuple, error) {
@@ -268,11 +279,16 @@ func (c *Client) ListCheckpointTuples(ctx context.Context, session, namespace, b
 }
 
 func (c *Client) PutWrites(ctx context.Context, session, namespace, checkpoint string, epoch int64, writes []PendingWrite) error {
+	return c.PutTurnWrites(ctx, session, namespace, checkpoint, epoch, writes, 0)
+}
+
+func (c *Client) PutTurnWrites(ctx context.Context, session, namespace, checkpoint string, epoch int64, writes []PendingWrite, turnSeq int64) error {
 	request := struct {
+		TurnSeq   int64          `json:"turn_seq,omitempty"`
 		Epoch     int64          `json:"lease_epoch"`
 		Namespace string         `json:"namespace"`
 		Writes    []PendingWrite `json:"writes"`
-	}{epoch, namespace, writes}
+	}{turnSeq, epoch, namespace, writes}
 	return c.http.Call(ctx, sessionPath(session)+"/checkpoints/"+url.PathEscape(checkpoint)+"/writes", request, nil, true)
 }
 

@@ -44,9 +44,9 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 		}
 		return signer.SignToolLease(caller.Claims, session, lease.Epoch, lease.ExpiresAt)
 	}
-	leaseResponse := func(caller transport.Principal, session string, lease Lease, err error) (any, error) {
-		if err != nil || signer == nil {
-			return lease, err
+	leaseResponse := func(caller transport.Principal, session string, lease Lease, control *journal.TurnControlDelta, err error) (any, error) {
+		if err != nil {
+			return nil, err
 		}
 		proof, err := leaseProof(caller, session, lease)
 		if err != nil {
@@ -54,8 +54,9 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 		}
 		return struct {
 			Lease
-			Proof string `json:"tool_lease_proof"`
-		}{lease, proof}, nil
+			Control *journal.TurnControlDelta `json:"control,omitempty"`
+			Proof   string                    `json:"tool_lease_proof,omitempty"`
+		}{lease, control, proof}, nil
 	}
 	mux := http.NewServeMux()
 	if store.s3 != nil {
@@ -68,7 +69,49 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 		}))
 	}
 	mux.HandleFunc("POST /v1/state/sessions:enqueue", jsonRoute(func(r *http.Request, caller transport.Principal, req EnqueueRequest) (any, error) {
+		if req.ExecutionMode != "" || req.DeliveryMode != "" || req.TargetTurnSeq != 0 {
+			if err := authorize(r.Context(), caller.Claims, "state.coordinate"); err != nil {
+				return nil, err
+			}
+		}
 		return store.EnqueueTurn(r.Context(), caller.Scope, req)
+	}))
+	mux.HandleFunc("POST /v1/state/sessions/{session}/vm:claim", jsonRoute(func(r *http.Request, caller transport.Principal, req journal.VMTurnClaimRequest) (any, error) {
+		if err := authorize(r.Context(), caller.Claims, "state.vm_claim"); err != nil {
+			return nil, err
+		}
+		if caller.Claims.Task != req.ExecutionID {
+			return nil, contracts.NewError(contracts.ErrForbidden, "VM execution does not match authenticated task")
+		}
+		turn, err := store.ClaimVMTurn(r.Context(), caller.Scope, r.PathValue("session"), req, duration(req.TTLMilliseconds))
+		if err != nil {
+			return nil, err
+		}
+		proof, err := leaseProof(caller, turn.SessionID, turn.Lease)
+		return struct {
+			TurnLease
+			Proof string `json:"tool_lease_proof,omitempty"`
+		}{turn, proof}, err
+	}))
+	mux.HandleFunc("POST /v1/state/sessions/{session}/vm:requeue-fenced", jsonRoute(func(r *http.Request, caller transport.Principal, req journal.FenceRequeueRequest) (any, error) {
+		if err := authorize(r.Context(), caller.Claims, "state.coordinate"); err != nil {
+			return nil, err
+		}
+		return struct{}{}, store.RequeueFencedVMTurn(r.Context(), caller.Scope, r.PathValue("session"), req)
+	}))
+	mux.HandleFunc("POST /v1/state/sessions/{session}/vm:cancel", jsonRoute(func(r *http.Request, caller transport.Principal, req struct {
+		TurnSeq int64 `json:"turn_seq,omitempty"`
+	}) (any, error) {
+		if err := authorize(r.Context(), caller.Claims, "state.coordinate"); err != nil {
+			return nil, err
+		}
+		return store.CancelTurn(r.Context(), caller.Scope, r.PathValue("session"), req.TurnSeq)
+	}))
+	mux.HandleFunc("GET /internal/v1/state/vm-reconcile", readRoute(func(r *http.Request, caller transport.Principal) (any, error) {
+		if err := authorize(r.Context(), caller.Claims, "state.coordinate"); err != nil {
+			return nil, err
+		}
+		return store.ListRecoverableVMSessions(r.Context(), caller.Scope, 64)
 	}))
 	if dotsFIFO {
 		mux.HandleFunc("POST /v1/state/sessions/dots:enqueue", jsonRoute(func(r *http.Request, caller transport.Principal, req journal.DotsEnqueueRequest) (any, error) {
@@ -171,8 +214,8 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 		if req.Status != "" {
 			return nil, invalidHTTP("session disposition requires release")
 		}
-		renewed, err := store.HeartbeatLease(r.Context(), caller.Scope, session, lease, duration(req.TTL))
-		return leaseResponse(caller, session, renewed, err)
+		renewed, control, err := store.HeartbeatLeaseWithControl(r.Context(), caller.Scope, session, lease, duration(req.TTL))
+		return leaseResponse(caller, session, renewed, control, err)
 	}))
 	mux.HandleFunc("POST /v1/state/sessions/{session}/events:append", jsonRouteLimit(3<<20, func(r *http.Request, caller transport.Principal, req appendRequest) (any, error) {
 		shared := false
@@ -230,8 +273,7 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 		return store.filteredEvents(r.Context(), caller.Scope, r.PathValue("session"), after, int(limit), namespace, filters)
 	}))
 	mux.HandleFunc("POST /v1/state/sessions/{session}/checkpoints", jsonRouteLimit(3<<20, func(r *http.Request, caller transport.Principal, req checkpointRequest) (any, error) {
-		id, err := store.PutCheckpoint(r.Context(), caller.Scope, r.PathValue("session"), authorizedLease(caller, req.Epoch), req.CheckpointCommit)
-		return checkpointResponse{ID: id}, err
+		return store.CommitCheckpoint(r.Context(), caller.Scope, r.PathValue("session"), authorizedLease(caller, req.Epoch), req.CheckpointCommit)
 	}))
 	mux.HandleFunc("GET /v1/state/sessions/{session}/checkpoints", readRoute(func(r *http.Request, caller transport.Principal) (any, error) {
 		query := r.URL.Query()
@@ -270,8 +312,8 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 		return struct{}{}, store.SetLegalHold(r.Context(), caller.Scope, r.PathValue("session"), *req.Held)
 	}))
 	mux.HandleFunc("POST /v1/state/sessions/{session}/checkpoints/{checkpoint}/writes", jsonRouteLimit(3<<20, func(r *http.Request, caller transport.Principal, req pendingWritesRequest) (any, error) {
-		return struct{}{}, store.PutWrites(r.Context(), caller.Scope, r.PathValue("session"),
-			authorizedLease(caller, req.Epoch), req.Namespace, r.PathValue("checkpoint"), req.Writes)
+		return struct{}{}, store.PutTurnWrites(r.Context(), caller.Scope, r.PathValue("session"),
+			authorizedLease(caller, req.Epoch), req.Namespace, r.PathValue("checkpoint"), req.Writes, req.TurnSeq)
 	}))
 	mutateIntentRoute := jsonRoute(func(r *http.Request, caller transport.Principal, req intentRequest) (any, error) {
 		return struct{}{}, store.MutateToolIntent(r.Context(), caller.Scope, req.Session, authorizedLease(caller, req.Epoch), req.Transition)
@@ -290,7 +332,7 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 			}
 		}
 		return store.MutateKV(r.Context(), caller.Scope, req.Session, authorizedLease(caller, req.Epoch), shared,
-			KVBatch{Key: req.Key, ExpectedSeq: req.ExpectedSeq, KV: req.KV, Catalog: req.Catalog})
+			KVBatch{TurnSeq: req.TurnSeq, Key: req.Key, ExpectedSeq: req.ExpectedSeq, KV: req.KV, Catalog: req.Catalog})
 	}))
 	mux.HandleFunc("GET /v1/state/kv", readRoute(func(r *http.Request, caller transport.Principal) (any, error) {
 		query := r.URL.Query()
@@ -377,17 +419,15 @@ type checkpointRequest struct {
 	CheckpointCommit
 }
 
-type checkpointResponse struct {
-	ID string `json:"checkpoint_id"`
-}
-
 type pendingWritesRequest struct {
+	TurnSeq   int64          `json:"turn_seq,omitempty"`
 	Epoch     int64          `json:"lease_epoch"`
 	Namespace string         `json:"namespace"`
 	Writes    []PendingWrite `json:"writes"`
 }
 
 type kvRequest struct {
+	TurnSeq     int64                  `json:"turn_seq,omitempty"`
 	Catalog     *OpenClawCatalogUpdate `json:"catalog,omitempty"`
 	Session     string                 `json:"session_id"`
 	Epoch       int64                  `json:"lease_epoch"`

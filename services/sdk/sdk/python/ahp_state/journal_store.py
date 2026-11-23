@@ -43,10 +43,11 @@ def _matches(namespace, condition):
 class AHPJournalStore(BaseStore):
     """Isolated per user and deployment, with versioned mutations and prefix reads."""
 
-    def __init__(self, client, session_id, lease_epoch):
+    def __init__(self, client, session_id, lease_epoch, *, turn_seq=None):
         self._client = client
         self._session_id = session_id
         self._epoch = lease_epoch
+        self._turn_seq = turn_seq
         self._session = _API + "/sessions/" + quote(session_id, safe="")
 
     def batch(self, ops):
@@ -156,6 +157,8 @@ class AHPJournalStore(BaseStore):
     async def _mutate(self, changes):
         request = {"session_id": self._session_id, "lease_epoch": self._epoch,
                    "key": "langstore:" + uuid4().hex, "kv": changes}
+        if self._turn_seq is not None:
+            request["turn_seq"] = self._turn_seq
         try:
             await self._client.request_state("POST", _API + "/kv:mutate", body=request)
         except StateAPIError as error:

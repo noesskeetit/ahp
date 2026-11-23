@@ -7,6 +7,12 @@ import (
 )
 
 type (
+	VMTurnClaimRequest     = journal.VMTurnClaimRequest
+	FenceRequeueRequest    = journal.FenceRequeueRequest
+	VMSession              = journal.VMSession
+	SteerAck               = journal.SteerAck
+	TurnControlDelta       = journal.TurnControlDelta
+	CheckpointReceipt      = journal.CheckpointReceipt
 	Payload                = journal.Payload
 	BlobRef                = journal.BlobRef
 	EventInput             = journal.EventInput

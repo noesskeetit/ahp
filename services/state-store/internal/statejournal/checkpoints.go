@@ -23,24 +23,29 @@ type CheckpointCommit = journal.CheckpointCommit
 type CheckpointTuple = journal.CheckpointTuple
 
 func (s *Store) PutCheckpoint(ctx context.Context, scope contracts.Scope, session string, lease Lease, req CheckpointCommit) (string, error) {
+	receipt, err := s.CommitCheckpoint(ctx, scope, session, lease, req)
+	return receipt.ID, err
+}
+
+func (s *Store) CommitCheckpoint(ctx context.Context, scope contracts.Scope, session string, lease Lease, req CheckpointCommit) (journal.CheckpointReceipt, error) {
 	cp := req.Checkpoint
 	if err := scope.Validate(); err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
 	}
 	if !validID(req.Key) || !validCheckpointKey(cp.Namespace, cp.ID) || !validID(cp.Codec) ||
 		(cp.ParentID != "" && (!validID(cp.ParentID) || cp.ParentID == cp.ID)) ||
 		cp.SnapshotSeq < 0 || !json.Valid(cp.Metadata) || !json.Valid(cp.ChannelVersions) ||
 		!validPayload(cp.Payload) || cp.ChatEventID != "" {
-		return "", contracts.NewError(contracts.ErrInvalid, "invalid checkpoint commit")
+		return journal.CheckpointReceipt{}, contracts.NewError(contracts.ErrInvalid, "invalid checkpoint commit")
 	}
 	if err := validateWrites(req.Writes); err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
 	}
 	if err := validateIntents(req.Intents); err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
 	}
 	if err := validateOutcomes(req.ToolOutcomes); err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
 	}
 	inline := len(cp.Payload.Inline) + inlineWritesSize(req.Writes)
 	for _, outcome := range req.ToolOutcomes {
@@ -49,15 +54,15 @@ func (s *Store) PutCheckpoint(ctx context.Context, scope contracts.Scope, sessio
 		}
 	}
 	if inline > 2<<20 {
-		return "", contracts.NewError(contracts.ErrInvalid, "checkpoint exceeds 2 MiB of inline payload")
+		return journal.CheckpointReceipt{}, contracts.NewError(contracts.ErrInvalid, "checkpoint exceeds 2 MiB of inline payload")
 	}
 	chat, err := encodeChatDelta(cp.Codec, req.Chat)
 	if err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
 	}
 	encoded, err := json.Marshal(req)
 	if err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
 	}
 	legacyDigest := sha256.Sum256(encoded)
 	// PostgreSQL compares the two JSONB fields directly on replay. Hash the
@@ -68,21 +73,24 @@ func (s *Store) PutCheckpoint(ctx context.Context, scope contracts.Scope, sessio
 	replayRequest.Checkpoint.ChannelVersions = nil
 	replayBody, err := json.Marshal(replayRequest)
 	if err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
 	}
 	canonicalDigest := sha256.Sum256(replayBody)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
 	}
 	defer tx.Rollback(ctx)
-	head, err := lockSession(ctx, tx, scope, session, lease)
+	head, turn, err := lockSessionState(ctx, tx, scope, session, lease)
 	if err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
+	}
+	if err := turn.validate(req.TurnSeq, req.SteerAck); err != nil {
+		return journal.CheckpointReceipt{}, err
 	}
 	if cp.SnapshotSeq > head {
-		return "", contracts.NewError(contracts.ErrConflict, "checkpoint references uncommitted journal events")
+		return journal.CheckpointReceipt{}, contracts.NewError(contracts.ErrConflict, "checkpoint references uncommitted journal events")
 	}
 	var id string
 	var chatID string
@@ -113,16 +121,17 @@ func (s *Store) PutCheckpoint(ctx context.Context, scope contracts.Scope, sessio
 			scope.Tenant, session, req.Key, cp.Metadata, cp.ChannelVersions).
 			Scan(&id, &priorLegacy, &priorCanonical, &sameJSON)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", contracts.NewError(contracts.ErrInvalid, "checkpoint parent must exist in the same session and namespace")
+			return journal.CheckpointReceipt{}, contracts.NewError(contracts.ErrInvalid, "checkpoint parent must exist in the same session and namespace")
 		}
 		if err != nil {
-			return "", err
+			return journal.CheckpointReceipt{}, err
 		}
 		if sameJSON && bytes.Equal(priorCanonical, canonicalDigest[:]) {
-			return id, nil
+			control, err := peekControl(ctx, tx, scope, session, turn)
+			return journal.CheckpointReceipt{ID: id, Control: control}, err
 		}
 		if priorCanonical != nil || !bytes.Equal(priorLegacy, legacyDigest[:]) {
-			return "", contracts.NewError(contracts.ErrKeyReuse, "checkpoint key has a different request digest")
+			return journal.CheckpointReceipt{}, contracts.NewError(contracts.ErrKeyReuse, "checkpoint key has a different request digest")
 		}
 		// An exact replay supplies the original request for a pre-upgrade
 		// checkpoint. Add its canonical digest without changing the old one.
@@ -130,43 +139,59 @@ func (s *Store) PutCheckpoint(ctx context.Context, scope contracts.Scope, sessio
 			UPDATE ahp_journal.checkpoints SET canonical_request_digest=$4
 			WHERE tenant_id=$1 AND session_id=$2 AND operation_key=$3`,
 			scope.Tenant, session, req.Key, canonicalDigest[:]); err != nil {
-			return "", err
+			return journal.CheckpointReceipt{}, err
 		}
-		return id, tx.Commit(ctx)
+		return journal.CheckpointReceipt{ID: id}, tx.Commit(ctx)
 	}
 	if err != nil {
-		return "", classifyWrite(err)
+		return journal.CheckpointReceipt{}, classifyWrite(err)
 	}
 	refs := addOutcomeBlobs(addWriteBlobs(addBlob(nil, cp.Payload), req.Writes), req.ToolOutcomes)
 	if err := s.pinBlobs(ctx, tx, scope, session, refs); err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
 	}
 	if err := putWrites(ctx, tx, scope.Tenant, session, cp.Namespace, cp.ID, req.Writes); err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
 	}
 	if err := prepareIntents(ctx, tx, scope.Tenant, session, lease.Epoch, req.Intents); err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
 	}
 	if err := commitOutcomes(ctx, tx, scope.Tenant, session, req.ToolOutcomes); err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
+	}
+	if err := applySteerAck(ctx, tx, scope, session, &turn, req.SteerAck); err != nil {
+		return journal.CheckpointReceipt{}, err
 	}
 	if chatID != "" {
-		if err := appendChatDelta(ctx, tx, scope, session, cp, head, chatID, chat); err != nil {
-			return "", err
+		if err := appendChatDelta(ctx, tx, scope, session, cp, head, chatID, chat, req.TurnSeq); err != nil {
+			return journal.CheckpointReceipt{}, err
 		}
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE ahp_journal.sessions SET head_checkpoint_id=$3, updated_at=clock_timestamp()
 		WHERE tenant_id=$1 AND session_id=$2`, scope.Tenant, session, id); err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
+	}
+	control, err := peekControl(ctx, tx, scope, session, turn)
+	if err != nil {
+		return journal.CheckpointReceipt{}, err
+	}
+	if turn.Mode == journal.ExecutionVMManaged && chatID != "" {
+		if err := notifyJournal(ctx, tx, scope, session); err != nil {
+			return journal.CheckpointReceipt{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return "", err
+		return journal.CheckpointReceipt{}, err
 	}
-	return id, nil
+	return journal.CheckpointReceipt{ID: id, Control: control}, nil
 }
 
 func (s *Store) PutWrites(ctx context.Context, scope contracts.Scope, session string, lease Lease, namespace, checkpointID string, writes []PendingWrite) error {
+	return s.PutTurnWrites(ctx, scope, session, lease, namespace, checkpointID, writes, 0)
+}
+
+func (s *Store) PutTurnWrites(ctx context.Context, scope contracts.Scope, session string, lease Lease, namespace, checkpointID string, writes []PendingWrite, turnSeq int64) error {
 	if err := scope.Validate(); err != nil {
 		return err
 	}
@@ -181,7 +206,11 @@ func (s *Store) PutWrites(ctx context.Context, scope contracts.Scope, session st
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := lockSession(ctx, tx, scope, session, lease); err != nil {
+	_, turn, err := lockSessionState(ctx, tx, scope, session, lease)
+	if err != nil {
+		return err
+	}
+	if err := turn.validate(turnSeq, nil); err != nil {
 		return err
 	}
 	if err := s.pinBlobs(ctx, tx, scope, session, addWriteBlobs(nil, writes)); err != nil {

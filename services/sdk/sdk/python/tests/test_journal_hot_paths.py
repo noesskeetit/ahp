@@ -17,6 +17,7 @@ class JournalTransport:
         self.checkpoints = {}
         self.kv = {}
         self.stale = False
+        self.control = None
 
     @asynccontextmanager
     async def fork_for_sync(self):
@@ -28,15 +29,25 @@ class JournalTransport:
             raise StateConflictError("STALE_EPOCH", "lease lost")
         if path.endswith(":acquire"):
             return {"epoch": 1}
+        if path.endswith(":claim-turn"):
+            return {"epoch": 1, "input_seq": 5}
+        if path.endswith("/vm:claim"):
+            return {"epoch": 1, "input_seq": body["turn_seq"]}
+        if path.endswith("/vm:cancel"):
+            return {"status": "ACTIVE"}
         if path.endswith(":heartbeat"):
-            return {"epoch": 1}
+            return {"epoch": 1, **({"control": self.control} if self.control else {})}
+        if path.endswith("/events:append"):
+            return {"head_seq": 20, "control": self.control}
+        if path.endswith(("/writes", "/intents:mutate", "/tools:begin-standalone")):
+            return {}
         if path.endswith("/checkpoints"):
             if method == "POST":
                 checkpoint = deepcopy(body["checkpoint"])
                 if "chat" in body:
                     checkpoint["chat_event_id"] = "chat:" + checkpoint["id"]
                 self.checkpoints[checkpoint["id"]] = {"checkpoint": checkpoint, "writes": None}
-                return {"checkpoint_id": checkpoint["id"]}
+                return {"checkpoint_id": checkpoint["id"], "control": self.control}
             if params.get("list") == "true":
                 assert params["include_tuples"] == "true"
                 requested = params.get("before")
@@ -62,6 +73,81 @@ class JournalTransport:
 
 def _checkpoint(i, messages):
     return {"id": f"cp-{i:03}", "channel_versions": {}, "channel_values": {"messages": messages}}
+
+
+async def test_vm_claim_turn_scope_and_followup_share_the_lease_epoch():
+    transport = JournalTransport()
+    journal = AHPJournalClient(transport, "session", harness_type="langgraph")
+    await journal.claim_vm_turn(turn_seq=5, generation=1, execution_id="exec-1")
+    assert transport.calls[-1][1:] == (
+        "/v1/state/sessions/session/vm:claim", None,
+        {"turn_seq": 5, "generation": 1, "execution_id": "exec-1", "ttl_ms": 30000},
+    )
+    transport.control = {"turn_seq": 5, "pending_steer": [{"seq": 7, "turn_seq": 5}]}
+    assert (await journal.heartbeat())["control"] == transport.control
+    ack = {"turn_seq": 5, "up_to_seq": 7, "count": 1}
+    await journal.append("event", 7, [], steer_ack=ack)
+    assert transport.calls[-1][3]["turn_seq"] == 5
+    assert transport.calls[-1][3]["steer_ack"] == ack
+    await journal.put_writes("c", [])
+    assert transport.calls[-1][3]["turn_seq"] == 5
+    await journal.mutate_kv("kv", [])
+    assert transport.calls[-1][3]["turn_seq"] == 5
+    await journal.mutate_tool_intent({"call_id": "call", "status": "DISPATCHED"})
+    assert transport.calls[-1][3]["transition"]["turn_seq"] == 5
+    old_guard = journal.standalone_tools()
+    await old_guard.begin("call", "tool", bytes(32))
+    assert transport.calls[-1][3]["turn_seq"] == 5
+    await journal.cancel_turn(turn_seq=5)
+    assert transport.calls[-1][1:] == ("/v1/state/sessions/session/vm:cancel", None, {"turn_seq": 5})
+
+    transport.control = {"turn_seq": 8, "next_turn": {"input_seq": 8, "epoch": 1}}
+    await journal.append("finish", 7, [], finish_turn="IDLE")
+    assert journal.epoch == 1 and journal.turn_seq == 8
+    assert old_guard.fenced
+    transport.control = {"turn_seq": 5, "cancel_requested": True}
+    assert "control" not in await journal.heartbeat()
+    await journal.put_checkpoint("old", {"id": "old"}, turn_seq=5)
+    assert transport.calls[-1][3]["turn_seq"] == 5
+    await journal.put_checkpoint("new", {"id": "new"})
+    assert transport.calls[-1][3]["turn_seq"] == 8
+    transport.control = None
+    await journal.append("finish-next", 20, [], finish_turn="IDLE")
+    assert journal.turn_seq is None
+
+
+async def test_pull_turn_does_not_send_vm_control_fields():
+    transport = JournalTransport()
+    journal = AHPJournalClient(transport, "session", harness_type="langgraph")
+    await journal.claim_turn()
+    await journal.append("event", 5, [])
+    assert "turn_seq" not in transport.calls[-1][3]
+
+
+async def test_checkpoint_saver_acks_with_materialized_input_and_pins_the_turn():
+    transport = JournalTransport()
+    journal = AHPJournalClient(transport, "session", harness_type="langgraph")
+    await journal.claim_vm_turn(turn_seq=5, generation=1, execution_id="exec-1")
+    saver = AHPJournalCheckpointSaver(transport, "session", journal, chat_channel="messages")
+    transport.control = {"pending_steer": [{"seq": 7, "turn_seq": 5}]}
+    config = {"configurable": {"thread_id": "session"}}
+    config = await saver.aput(config, _checkpoint(1, []), {}, {})
+    assert "steer_ack" not in transport.calls[-1][3]
+    assert saver.control == transport.control
+    ack = {"turn_seq": 5, "up_to_seq": 7, "count": 1}
+    transport.control = {"cancel_requested": True}
+    config = await saver.aput(config, _checkpoint(2, [HumanMessage(id="steer-7", content="stop")]),
+                              {}, {}, steer_ack=ack)
+    assert transport.calls[-1][3]["steer_ack"] == ack
+    assert transport.calls[-1][3]["turn_seq"] == 5
+    assert transport.calls[-1][3]["chat"]["upserts"][0]["content"] == "stop"
+    assert saver.control == transport.control
+
+    transport.control = {"next_turn": {"input_seq": 8, "epoch": 1}}
+    await journal.append("finish", 7, [], finish_turn="IDLE")
+    assert saver.control is None
+    await saver.aput_writes(config, [("node", "old turn")], "task")
+    assert transport.calls[-1][3]["turn_seq"] == 5
 
 
 async def test_checkpoint_chat_hot_path_reads_current_tuple_and_lists_in_one_get():
@@ -98,6 +184,13 @@ async def test_store_batches_puts_and_preserves_get_order_without_a_session_read
     assert len(posts) == 2
     assert all(call[1] == "/v1/state/kv:mutate" and "expected_seq" not in call[3] for call in posts)
     assert [call[1] for call in transport.calls if call[0] == "GET"] == ["/v1/state/kv"] * 4
+
+
+async def test_vm_store_writes_are_bound_to_the_invocation_turn():
+    transport = JournalTransport()
+    store = AHPJournalStore(transport, "session", 1, turn_seq=5)
+    await store.abatch([PutOp(("ns",), "a", {"v": 1})])
+    assert transport.calls[-1][3]["turn_seq"] == 5
 
 
 async def test_lease_context_fences_and_does_not_release_an_obsolete_lease():
