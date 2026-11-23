@@ -85,3 +85,19 @@ func TestLongOccupancySeparatesReservationsExecutionAndStreams(t *testing.T) {
 		t.Fatalf("occupancy reported reservation, execution or SSE incorrectly: %+v", got)
 	}
 }
+
+func TestExecutionEvidenceCoversVerifiedTurns(t *testing.T) {
+	completed := time.Unix(100, 0)
+	turns := []requestResult{
+		{ID: "p5-c16-turn-1", SessionID: "session", Seq: 30, VerifiedAt: 1},
+		{ID: "p5-c16-turn-2", SessionID: "session", Seq: 38, Failure: "sse_interrupted"},
+	}
+	intervals := []journalInterval{{ID: "p5-c32-turn-1", Session: "session", TurnSeq: 30, Completed: &completed}}
+	if err := verifyLongIntervals(turns, intervals); err == nil {
+		t.Fatal("verified turn was matched to execution evidence from another stage")
+	}
+	intervals[0].ID = "p5-c16-turn-1"
+	if err := verifyLongIntervals(turns, intervals); err != nil {
+		t.Fatalf("verified turn did not match its own execution evidence: %v", err)
+	}
+}

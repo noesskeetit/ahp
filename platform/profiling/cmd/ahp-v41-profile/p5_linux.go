@@ -152,6 +152,9 @@ func runLongStage(ctx context.Context, s *stand, cfg sessionConfig, name string,
 			}
 		}
 		intervalErr = writeJSONFile(filepath.Join(c.dir, "execution-intervals.json"), intervals)
+		if intervalErr == nil {
+			intervalErr = verifyLongIntervals(c.rows, intervals)
+		}
 	}
 	if intervalErr != nil {
 		c.note("journal execution evidence: " + intervalErr.Error())
@@ -253,7 +256,7 @@ func runLongLane(ctx context.Context, s *stand, c *collector, cfg sessionConfig,
 				if monotonicNS() < deadline && !c.stop.Load() {
 					n := ordinal.Add(1)
 					nextInput = turnInput{
-						ID: fmt.Sprintf("%s-turn-%d", c.phase, n), Padding: strings.Repeat("x", 4<<10),
+						ID: longTurnPrefix(c.phase) + strconv.FormatInt(n, 10), Padding: strings.Repeat("x", 4<<10),
 						Tools: 2, ThinkMillis: 2200, MCPMillis: 50, Large: n%8 == 0,
 						HoldForFollowup: true, WorkerClaimTTLMS: ttlMS,
 					}
@@ -293,6 +296,10 @@ func runLongLane(ctx context.Context, s *stand, c *collector, cfg sessionConfig,
 	}
 }
 
+func longTurnPrefix(stage string) string {
+	return stage + "-turn-"
+}
+
 func readLongIntervals(ctx context.Context, s *stand, stage string, lanes int) ([]journalInterval, error) {
 	var tenants, sessions []string
 	for lane := range lanes {
@@ -310,8 +317,8 @@ func readLongIntervals(ctx context.Context, s *stand, stage string, lanes int) (
         JOIN ahp_journal.session_events b USING (tenant_id,session_id)
         LEFT JOIN ahp_journal.session_events t
           ON t.tenant_id=b.tenant_id AND t.session_id=b.session_id AND t.event_uid='turn.completed:'||b.turn_seq
-        WHERE b.event_type='bench.started' AND convert_from(b.inline_payload,'UTF8')::jsonb->>'id' LIKE $3
-        ORDER BY b.created_at`, tenants, sessions, strings.SplitN(stage, "-", 2)[0]+"-turn-%")
+		WHERE b.event_type='bench.started' AND starts_with(convert_from(b.inline_payload,'UTF8')::jsonb->>'id', $3)
+		ORDER BY b.created_at`, tenants, sessions, longTurnPrefix(stage))
 	if err != nil {
 		return nil, err
 	}
@@ -336,6 +343,21 @@ func readLongIntervals(ctx context.Context, s *stand, stage string, lanes int) (
 type longTurnKey struct {
 	session string
 	seq     int64
+}
+
+func verifyLongIntervals(turns []requestResult, intervals []journalInterval) error {
+	completed := make(map[longTurnKey]string, len(intervals))
+	for _, interval := range intervals {
+		if interval.Completed != nil && !interval.Superseded {
+			completed[longTurnKey{interval.Session, interval.TurnSeq}] = interval.ID
+		}
+	}
+	for _, turn := range turns {
+		if turn.VerifiedAt > 0 && turn.Failure == "" && completed[longTurnKey{turn.SessionID, turn.Seq}] != turn.ID {
+			return fmt.Errorf("verified turn %s has no matching journal interval", turn.ID)
+		}
+	}
+	return nil
 }
 
 func joinLongCommitTrace(path string, intervals []journalInterval) error {
