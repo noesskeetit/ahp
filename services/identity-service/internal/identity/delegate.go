@@ -117,6 +117,9 @@ func (s *Store) delegate(ctx context.Context, parentScope contracts.Scope, paren
 		if err := lockTaskKey(ctx, tx, childScope, r.Task); err != nil {
 			return err
 		}
+		if err := requireUnfencedExecution(ctx, tx, childScope, r.Task); err != nil {
+			return err
+		}
 		parent, found, err := findGrant(ctx, tx, parentScope, parentTask)
 		if err != nil {
 			return err

@@ -12,8 +12,9 @@ import (
 )
 
 type HTTPDispatcher struct {
-	BaseURL string
-	Client  *http.Client
+	BaseURL     string
+	Client      *http.Client
+	TokenSource func(context.Context) (string, error)
 }
 
 func (d HTTPDispatcher) EnsureRunning(ctx context.Context, execution Execution) error {
@@ -38,14 +39,21 @@ func (d HTTPDispatcher) call(ctx context.Context, action string, execution Execu
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if d.TokenSource != nil {
+		token, err := d.TokenSource(ctx)
+		if err != nil {
+			return fmt.Errorf("read runtime dispatch token: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	res, err := d.Client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
-	// In particular 202 is not evidence that fencing has completed.
-	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusNoContent && !(action == ":ensure" && res.StatusCode == http.StatusAccepted) {
+	if res.StatusCode != http.StatusOK && !(action == ":ensure" &&
+		(res.StatusCode == http.StatusAccepted || res.StatusCode == http.StatusNoContent)) {
 		return fmt.Errorf("Runtime %s returned HTTP %d", action, res.StatusCode)
 	}
 	return nil

@@ -40,8 +40,14 @@ type Supervisor struct {
 	socket string
 	rt     VMRuntime
 
-	mu   sync.Mutex
-	live map[string]Sandbox
+	mu        sync.Mutex
+	live      map[string]Sandbox
+	releasing map[string]*sandboxRelease
+}
+
+type sandboxRelease struct {
+	done chan struct{}
+	err  error
 }
 
 // NewSupervisor builds a supervisor bound to the unix socket socket, backed by
@@ -54,7 +60,10 @@ func NewSupervisor(socket string, rt VMRuntime) (*Supervisor, error) {
 	if rt == nil {
 		return nil, Unavailable("supervisor", "no microVM runtime supplied; refusing to start a supervisor without a real hypervisor")
 	}
-	return &Supervisor{socket: socket, rt: rt, live: make(map[string]Sandbox)}, nil
+	return &Supervisor{
+		socket: socket, rt: rt, live: make(map[string]Sandbox),
+		releasing: make(map[string]*sandboxRelease),
+	}, nil
 }
 
 // Socket reports the unix socket path the supervisor serves on.
@@ -175,20 +184,54 @@ func (s *Supervisor) handleRelease(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.mu.Lock()
-	_, ok := s.live[in.SandboxID]
-	delete(s.live, in.SandboxID)
-	s.mu.Unlock()
-	if !ok {
-		// Releasing an already-gone guest is idempotent.
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	if err := s.rt.Release(r.Context(), in.SandboxID); err != nil {
+	if err := s.release(r.Context(), in.SandboxID); err != nil {
 		supervisorError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Supervisor) release(ctx context.Context, sandboxID string) error {
+	s.mu.Lock()
+	guest, found := s.live[sandboxID]
+	if !found {
+		s.mu.Unlock()
+		return s.rt.Release(ctx, sandboxID)
+	}
+	if pending := s.releasing[sandboxID]; pending != nil {
+		select {
+		case <-pending.done:
+			// A previous release failed. Retry against the same handle.
+		default:
+			s.mu.Unlock()
+			select {
+			case <-pending.done:
+				return pending.err
+			case <-ctx.Done():
+				return Unavailable(s.rt.Name(), ctx.Err().Error())
+			}
+		}
+	}
+	stop := &sandboxRelease{done: make(chan struct{})}
+	s.releasing[sandboxID] = stop
+	s.mu.Unlock()
+
+	if runtime, ok := s.rt.(interface {
+		ReleaseSandbox(context.Context, Sandbox) error
+	}); ok {
+		stop.err = runtime.ReleaseSandbox(ctx, guest)
+	} else {
+		stop.err = s.rt.Release(ctx, sandboxID)
+	}
+
+	s.mu.Lock()
+	if stop.err == nil {
+		delete(s.live, sandboxID)
+		delete(s.releasing, sandboxID)
+	}
+	close(stop.done)
+	s.mu.Unlock()
+	return stop.err
 }
 
 // handlePTY streams a guest terminal over one request/response pair. The
@@ -272,6 +315,9 @@ func (s *Supervisor) handlePTY(w http.ResponseWriter, r *http.Request) {
 func (s *Supervisor) sandbox(id string) (Sandbox, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.releasing[id] != nil {
+		return nil, false
+	}
 	sb, ok := s.live[id]
 	return sb, ok
 }

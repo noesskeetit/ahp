@@ -34,6 +34,7 @@ func (s *Store) DeleteSubject(ctx context.Context, tenant, subject string) error
 			return contracts.NewError(contracts.ErrForbidden, "identity: subject revocation required")
 		}
 		for _, q := range []string{
+			`DELETE FROM ahp_identity.execution_fences WHERE tenant=$1 AND subject=$2`,
 			`DELETE FROM ahp_identity.resource_rules WHERE tenant=$1 AND subject=$2`,
 			`DELETE FROM ahp_identity.browser_token_bindings WHERE session_id IN (SELECT session_id FROM ahp_identity.browser_sessions WHERE tenant=$1 AND subject=$2)`,
 			`DELETE FROM ahp_identity.browser_sessions WHERE tenant=$1 AND subject=$2`,

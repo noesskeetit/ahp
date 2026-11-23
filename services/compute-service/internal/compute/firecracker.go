@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,7 +14,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ahp-platform/ahp/pkg/contracts"
@@ -156,6 +159,7 @@ type fcSandbox struct {
 	node    string
 	dir     string
 	proc    *os.Process
+	done    chan struct{}
 	api     *fcClient
 	agent   *guestClient
 	rootfs  string
@@ -172,12 +176,18 @@ func (s *fcSandbox) Node() string    { return s.node }
 // failure after the process starts the guest is torn down before returning, so
 // a half-booted VM never lingers.
 func (r *FirecrackerRuntime) Acquire(ctx context.Context, spec AcquireSpec) (Sandbox, error) {
+	return r.acquire(ctx, spec, "vm-"+contracts.NewID(), nil)
+}
+
+func (r *FirecrackerRuntime) acquire(ctx context.Context, spec AcquireSpec, vmID string, processAttr *syscall.SysProcAttr) (_ Sandbox, acquireErr error) {
 	if err := r.Probe(ctx); err != nil {
 		return nil, err
 	}
-	vmID := "vm-" + contracts.NewID()
 	dir := filepath.Join(r.cfg.DataDir, vmID)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	if err := os.MkdirAll(r.cfg.DataDir, 0o750); err != nil {
+		return nil, Unavailable("firecracker", "cannot create data directory: "+err.Error())
+	}
+	if err := os.Mkdir(dir, 0o750); err != nil {
 		return nil, Unavailable("firecracker", "cannot create vm dir: "+err.Error())
 	}
 	rootfs := filepath.Join(dir, "rootfs.ext4")
@@ -194,30 +204,25 @@ func (r *FirecrackerRuntime) Acquire(ctx context.Context, spec AcquireSpec) (San
 		_ = os.RemoveAll(dir)
 		return nil, Unavailable("firecracker", "cannot open log: "+lerr.Error())
 	}
-	cmd := exec.CommandContext(ctx, r.cfg.Binary, "--api-sock", apiSock, "--id", vmID)
+	cmd := exec.Command(r.cfg.Binary, "--api-sock", apiSock, "--id", vmID)
 	cmd.Stderr = errLog
-	if err := cmd.Start(); err != nil {
+	cmd.SysProcAttr = processAttr
+	if err := sb.start(ctx, cmd); err != nil {
 		_ = errLog.Close()
 		_ = os.RemoveAll(dir)
 		return nil, Unavailable("firecracker", "cannot start firecracker: "+err.Error())
 	}
 	_ = errLog.Close()
-	sb.proc = cmd.Process
-	go func() { _ = cmd.Wait() }()
+	defer sb.cleanupAfterFailedStart(&acquireErr)
 
 	api := newFCClient(apiSock)
 	sb.api = api
-	defer func() {
-		// If any configuration step fails, tear the guest down completely.
-	}()
 
 	if err := r.waitForSocket(ctx, apiSock); err != nil {
-		sb.teardown()
 		return nil, err
 	}
 	vcpu, mem := r.machineFor(spec.Quota)
 	if err := api.putMachineConfig(ctx, vcpu, mem); err != nil {
-		sb.teardown()
 		return nil, err
 	}
 	bootArgs := r.cfg.BootArgs
@@ -225,27 +230,22 @@ func (r *FirecrackerRuntime) Acquire(ctx context.Context, spec AcquireSpec) (San
 		bootArgs = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
 	}
 	if err := api.putBootSource(ctx, r.cfg.KernelImage, bootArgs); err != nil {
-		sb.teardown()
 		return nil, err
 	}
 	if err := api.putDrive(ctx, "rootfs", rootfs, true, false); err != nil {
-		sb.teardown()
 		return nil, err
 	}
 	if r.cfg.TapName != "" && r.cfg.GuestMAC != "" {
 		if err := api.putNetwork(ctx, "eth0", r.cfg.TapName, r.cfg.GuestMAC); err != nil {
-			sb.teardown()
 			return nil, err
 		}
 	}
 	if err := api.startInstance(ctx); err != nil {
-		sb.teardown()
 		return nil, err
 	}
 	if r.cfg.GuestAgent != "" {
 		gc := newGuestClient(r.cfg.GuestAgent)
 		if err := r.waitForAgent(ctx, gc); err != nil {
-			sb.teardown()
 			return nil, err
 		}
 		sb.agent = gc
@@ -295,38 +295,79 @@ func (r *FirecrackerRuntime) OpenPTY(ctx context.Context, sb Sandbox, spec PTYSp
 	return fs.agent.openPTY(ctx, spec)
 }
 
-// Release tears the guest down for good: stop the hypervisor, remove its state.
-func (r *FirecrackerRuntime) Release(ctx context.Context, sandboxID string) error {
-	// Guests are disposable and not pooled; the supervisor only ever releases
-	// sandboxes it produced, each owning its own process/dir. There is no
-	// shared state to coordinate, so a no-op here is correct when the process
-	// is already gone.
-	_ = ctx
-	_ = sandboxID
-	return nil
+// Release checks the legacy per-VM directory when a supervisor has lost its
+// in-memory handle. It can confirm an already-released guest, but cannot
+// certify shutdown of a guest whose directory still exists.
+func (r *FirecrackerRuntime) Release(_ context.Context, id string) error {
+	if !strings.HasPrefix(id, "vm-") || filepath.Base(id) != id {
+		return invalid("invalid Firecracker sandbox id")
+	}
+	if _, err := os.Stat(r.cfg.DataDir); err != nil {
+		return Unavailable("firecracker", "cannot check sandbox data directory: "+err.Error())
+	}
+	if _, err := os.Lstat(filepath.Join(r.cfg.DataDir, id)); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return Unavailable("firecracker", "sandbox shutdown cannot be confirmed without its supervisor handle")
 }
 
-// ReleaseSandbox tears down a specific live sandbox handle. The supervisor uses
-// this so process and directory lifetime is owned by the sandbox itself.
-func (r *FirecrackerRuntime) ReleaseSandbox(sb Sandbox) error {
+func (r *FirecrackerRuntime) ReleaseSandbox(ctx context.Context, sb Sandbox) error {
 	fs, ok := sb.(*fcSandbox)
 	if !ok {
 		return invalid("compute: sandbox not from firecracker runtime")
 	}
-	fs.teardown()
+	return fs.stop(ctx, true)
+}
+
+// The request bounds readiness, while the sandbox owns the hypervisor's
+// lifetime. Exactly one goroutine reaps each process.
+func (s *fcSandbox) start(ctx context.Context, cmd *exec.Cmd) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	s.proc = cmd.Process
+	s.done = make(chan struct{})
+	done := s.done
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
 	return nil
 }
 
-func (s *fcSandbox) teardown() {
-	if s.proc != nil {
-		_ = s.proc.Kill()
-		_, _ = s.proc.Wait()
-		s.proc = nil
+func (s *fcSandbox) cleanupAfterFailedStart(startErr *error) {
+	if *startErr != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		*startErr = errors.Join(*startErr, s.stop(ctx, true))
 	}
-	if s.dir != "" {
-		_ = os.RemoveAll(s.dir)
+}
+
+func (s *fcSandbox) stop(ctx context.Context, removeDir bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.proc != nil {
+		if err := s.proc.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return Unavailable("firecracker", "cannot signal hypervisor: "+err.Error())
+		}
+		select {
+		case <-s.done:
+			s.proc = nil
+		case <-ctx.Done():
+			return Unavailable("firecracker", "hypervisor exit not confirmed: "+ctx.Err().Error())
+		}
+	}
+	if removeDir && s.dir != "" {
+		if err := os.RemoveAll(s.dir); err != nil {
+			return Unavailable("firecracker", "cannot remove stopped guest directory: "+err.Error())
+		}
 		s.dir = ""
 	}
+	return nil
 }
 
 func (r *FirecrackerRuntime) waitForSocket(ctx context.Context, path string) error {

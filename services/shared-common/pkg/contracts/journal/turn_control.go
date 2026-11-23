@@ -74,6 +74,20 @@ func DeterministicExecutionID(scope contracts.Scope, session string, turnSeq, ge
 	return "exec-" + hex.EncodeToString(sum[:12])
 }
 
+// ValidExecutionID checks the canonical shape before a physical execution or
+// a grant fence can be addressed by an ID.
+func ValidExecutionID(id string) bool {
+	if len(id) != len("exec-")+24 || id[:len("exec-")] != "exec-" {
+		return false
+	}
+	for _, c := range id[len("exec-"):] {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 const SessionSignalChannel = "ahp_rc_sig"
 
 type SessionSignal struct {

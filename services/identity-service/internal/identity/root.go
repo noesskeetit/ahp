@@ -78,6 +78,9 @@ func (s *Store) CreateRoot(ctx context.Context, scope contracts.Scope, r RootReq
 		if err := lockTaskKey(ctx, tx, scope, r.Task); err != nil {
 			return err
 		}
+		if err := requireUnfencedExecution(ctx, tx, scope, r.Task); err != nil {
+			return err
+		}
 		// Same-scope context reference, checked before anything else can
 		// fail: a context id that exists under another scope is invisible
 		// here and reports NOT_FOUND, so a foreign reference never leaks

@@ -26,6 +26,7 @@ package compute
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -161,7 +162,7 @@ func (r *FirecrackerRuntime) Snapshot(ctx context.Context, sb Sandbox) (Snapshot
 }
 
 // RestoreSnapshot brings the recorded incarnation back and resumes it.
-func (r *FirecrackerRuntime) RestoreSnapshot(ctx context.Context, ref SnapshotRef) (Sandbox, error) {
+func (r *FirecrackerRuntime) RestoreSnapshot(ctx context.Context, ref SnapshotRef) (_ Sandbox, restoreErr error) {
 	// A restore needs the hypervisor binary and the recorded files, and NOT the
 	// boot configuration: the kernel and the machine shape are inside the snapshot
 	// state, which is exactly why waking a guest is not booting one. Asking for
@@ -193,21 +194,24 @@ func (r *FirecrackerRuntime) RestoreSnapshot(ctx context.Context, ref SnapshotRe
 	// one is stale and must not be confused with a live API.
 	_ = os.Remove(sock)
 	sb := &fcSandbox{id: ref.SandboxID, node: ref.Node, dir: ref.Dir, rootfs: rootfs, tapName: r.cfg.TapName}
-	cmd := exec.CommandContext(ctx, r.cfg.Binary, "--api-sock", sock, "--id", ref.SandboxID)
-	if err := cmd.Start(); err != nil {
+	cmd := exec.Command(r.cfg.Binary, "--api-sock", sock, "--id", ref.SandboxID)
+	if err := sb.start(ctx, cmd); err != nil {
 		return nil, Unavailable("firecracker", "cannot start hypervisor to restore: "+err.Error())
 	}
-	sb.proc = cmd.Process
-	go func() { _ = cmd.Wait() }()
+	defer func() {
+		if restoreErr != nil {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			restoreErr = errors.Join(restoreErr, sb.stop(stopCtx, false))
+		}
+	}()
 
 	api := newFCClient(sock)
 	sb.api = api
 	if err := r.waitForSocket(ctx, sock); err != nil {
-		sb.teardown()
 		return nil, err
 	}
 	if err := api.loadSnapshot(ctx, ref.StatePath, ref.MemPath, true); err != nil {
-		sb.teardown()
 		return nil, err
 	}
 	if r.cfg.GuestAgent != "" {

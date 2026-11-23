@@ -107,7 +107,16 @@ func run(ctx context.Context, env func(string) string) error {
 	}
 	defer pool.Close()
 	bus := runcoord.NewPGSignalBus(pool)
-	c := &runcoord.Coordinator{Scope: scope, State: state, Signals: bus, Dispatcher: runcoord.HTTPDispatcher{BaseURL: env("AHP_RC_RUNTIME_URL"), Client: client}}
+	runtimeClient := *client
+	runtimeClient.Timeout = 90 * time.Second
+	dispatcher := runcoord.HTTPDispatcher{BaseURL: env("AHP_RC_RUNTIME_URL"), Client: &runtimeClient}
+	if tokenFile := env("AHP_RC_RUNTIME_TOKEN_FILE"); tokenFile != "" {
+		dispatcher.TokenSource = func(context.Context) (string, error) {
+			token, err := os.ReadFile(tokenFile)
+			return strings.TrimSpace(string(token)), err
+		}
+	}
+	c := &runcoord.Coordinator{Scope: scope, State: state, Signals: bus, Dispatcher: dispatcher}
 	protected := transport.Task(verify, "ahp", "run.coordinate", func(_ context.Context, claims auth.Claims, capability string) error {
 		if !slices.Contains(claims.Capabilities, capability) {
 			return contracts.NewError(contracts.ErrForbidden, "task cannot call coordinator")

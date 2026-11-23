@@ -244,22 +244,36 @@ func TestRestoreLoadsSnapshotAndResumes(t *testing.T) {
 		MemPath:   filepath.Join(dir, "vm-memory.snapshot"),
 	}
 	fake := newFakeFirecrackerAfter(t, sock, 150*time.Millisecond)
-	// "firecracker" here is a command that exits at once: the runtime must not
-	// depend on the process staying alive to reach the API, and the fake owns the
-	// socket. A real restore of course needs the real binary.
+	// Use a real child while the fake handles only the hypervisor wire protocol.
+	binary := filepath.Join(dir, "test-hypervisor")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexec /bin/sleep 60\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	rt := &FirecrackerRuntime{cfg: FirecrackerConfig{
-		Binary:       "/usr/bin/true",
+		Binary:       binary,
 		DataDir:      filepath.Dir(dir),
 		RootFSImage:  filepath.Join(dir, "rootfs.ext4"),
 		StartTimeout: 2 * time.Second,
 	}}
-	snap, ok := interface{}(rt).(Snapshotter)
-	if !ok {
-		t.Fatalf("the firecracker runtime must be able to restore a snapshot; %T does not implement compute.Snapshotter", rt)
-	}
-	restored, err := snap.RestoreSnapshot(context.Background(), ref)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	restored, err := rt.RestoreSnapshot(ctx, ref)
 	if err != nil {
 		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+	sb := restored.(*fcSandbox)
+	t.Cleanup(func() {
+		ctx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+		defer stop()
+		if err := sb.stop(ctx, false); err != nil {
+			t.Errorf("stop restored process: %v", err)
+		}
+	})
+	cancel()
+	select {
+	case <-sb.done:
+		t.Fatal("the restored guest died when its request ended")
+	case <-time.After(100 * time.Millisecond):
 	}
 	if restored.ID() != ref.SandboxID || restored.Node() != ref.Node {
 		t.Errorf("a restored guest is the SAME incarnation: got id=%q node=%q", restored.ID(), restored.Node())

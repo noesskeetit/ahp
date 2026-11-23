@@ -151,7 +151,8 @@ const schemaMigrateLockKey int64 = 720261029
 // now reads did not exist, and every context widening failed with 42P01. The
 // DDL and the guards it re-runs are idempotent, so this transition is a no-op
 // wherever the table is already present.
-const schemaVersion int64 = 8
+// Version 9 records task-scoped fences even if no execution grant exists yet.
+const schemaVersion int64 = 9
 
 // sentinelTableDDL creates the migration sentinel. It is safe to run on every
 // migrate: once the table exists the statement takes only ACCESS SHARE, which

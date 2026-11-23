@@ -38,6 +38,13 @@ package identity
 const schemaDDL = `
 CREATE SCHEMA IF NOT EXISTS ahp_identity;
 CREATE TABLE IF NOT EXISTS ahp_identity.erased_tenants (tenant text PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS ahp_identity.execution_fences (
+    tenant      text NOT NULL,
+    deployment  text NOT NULL,
+    subject     text NOT NULL,
+    task        text NOT NULL,
+    PRIMARY KEY (tenant, deployment, subject, task)
+);
 
 -- Revoked subjects. A row here is a hard stop: while it exists no grant of
 -- that (tenant, subject) may be inserted or re-parented, and no new root may

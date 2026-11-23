@@ -20,12 +20,29 @@ Build `./cmd/run-coordinator` in the output of `python3 assemble.py <new-directo
 | `AHP_RC_TENANT`, `AHP_RC_DEPLOYMENT`, `AHP_RC_SUBJECT` | Verified scope of the replica |
 | `AHP_RC_STATE_URL`, `AHP_RC_RUNTIME_URL` | Bare HTTPS origins |
 | `AHP_RC_TLS_CERT`, `AHP_RC_TLS_KEY`, `AHP_RC_CA` | Certificate files for ingress and egress mutual TLS |
-| `AHP_RC_STATE_TOKEN_FILE` | Rotated, scope-bound service task token |
+| `AHP_RC_STATE_TOKEN_FILE` | Rotated, scope-bound State task token |
+| `AHP_RC_RUNTIME_TOKEN_FILE` | Rotated task token with `runtime.dispatch` for the managed Runtime endpoint |
 | `AHP_RC_JWT_ISSUER`, `AHP_RC_JWT_KID`, `AHP_RC_JWT_PUBLIC_KEY` | Ingress task-token verification |
 | `AHP_RC_NOTIFY_DSN` | PostgreSQL connection for journal notifications |
 | `AHP_RC_ADDR`, `AHP_RC_OTLP_ENDPOINT` | Optional listen address and trace collector |
 
 The coordinator ingress expects `run.coordinate`. Its State API token needs `state` and `state.coordinate`. Only trusted VM task tokens should receive `state.vm_claim`. Production credentials and Runtime launch claims are supplied by the deployment and identity owners.
+
+## Managed execution lifecycle
+
+Build `./cmd/ahp-vm-runtime` for a Linux host with KVM and writable delegated cgroup v2. This entry point uses one configured execution host per Runtime endpoint. It records the execution and attempt in PostgreSQL and the host's occupied slot on persistent disk. A fence permanently closes the slot, revokes the execution grant even if it had not been created, and waits for the cgroup to empty before returning 200. An unreachable host returns 503.
+
+| Configuration | Use |
+|---|---|
+| `AHP_VM_RUNTIME_HOST_ID`, `AHP_VM_RUNTIME_SLOT_DIR` | Stable host identity and persistent private directory for slot state |
+| `AHP_VM_RUNTIME_CGROUP_ROOT` | Delegated cgroup v2 subtree on that host |
+| `AHP_VM_RUNTIME_DSN`, `AHP_VM_RUNTIME_IDENTITY_DSN` | Runtime and Identity PostgreSQL connections |
+| `AHP_VM_RUNTIME_TLS_CERT`, `AHP_VM_RUNTIME_TLS_KEY`, `AHP_VM_RUNTIME_CA` | Runtime server certificate and coordinator client CA |
+| `AHP_VM_RUNTIME_JWT_ISSUER`, `AHP_VM_RUNTIME_JWT_KID`, `AHP_VM_RUNTIME_JWT_PUBLIC_KEY` | Dispatch token verification |
+| `AHP_VM_RUNTIME_COORDINATOR_WORKLOAD_IDS` | Comma-separated coordinator SPIFFE IDs |
+| `AHP_VM_RUNTIME_ADDR` | Bind address, default `127.0.0.1:8454` |
+
+Use the Firecracker settings documented in the compute supervisor configuration. Preserve both the slot directory and the host identity across restarts. This entry point controls physical lifecycle and grant revocation. The guest image, vsock AuthInjector, and global coordinator routing are separate integration pieces.
 
 ## Acceptance
 
