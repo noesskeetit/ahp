@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/ahp-platform/ahp/pkg/transport"
 	stateclient "github.com/ahp-platform/ahp/sdk/go/state/journal"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestVMTurnNotificationsPostgres(t *testing.T) {
@@ -115,6 +117,220 @@ func TestVMTurnNotificationsPostgres(t *testing.T) {
 
 type liveSSEFrame struct {
 	id, event, data string
+}
+
+func TestSSEStateReadRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		code       string
+		failures   int
+		failProbe  bool
+		cancelRead bool
+		wantReads  []string
+		wantFrames []string
+	}{
+		{name: "transient tail", status: 503, code: contracts.ErrUnavailable, failures: 1,
+			wantReads: []string{"0/1", "0/128", "2/128", "2/128"}, wantFrames: []string{"journal:2", "journal:3", "journal:4", "end:"}},
+		{name: "transient probe", status: 503, code: contracts.ErrUnavailable, failures: 1, failProbe: true,
+			wantReads: []string{"0/1", "0/1", "0/128", "2/128"}, wantFrames: []string{"journal:2", "journal:3", "journal:4", "end:"}},
+		{name: "exhausted", status: 503, code: contracts.ErrUnavailable, failures: 3,
+			wantReads: []string{"0/1", "0/128", "2/128", "2/128"}, wantFrames: []string{"journal:2", "error:"}},
+		{name: "forbidden", status: 403, code: contracts.ErrForbidden, failures: 1,
+			wantReads: []string{"0/1", "0/128", "2/128"}, wantFrames: []string{"journal:2", "error:"}},
+		{name: "internal", status: 500, code: "INTERNAL", failures: 1,
+			wantReads: []string{"0/1", "0/128", "2/128"}, wantFrames: []string{"journal:2", "error:"}},
+		{name: "stream canceled", status: 503, code: contracts.ErrUnavailable, failures: 1, cancelRead: true,
+			wantReads: []string{"0/1", "0/128", "2/128"}, wantFrames: []string{"journal:2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			var (
+				mu    sync.Mutex
+				reads []string
+			)
+			remaining := tc.failures
+			first := journal.Event{Seq: 1, EventInput: journal.EventInput{TurnSeq: 1, Type: "turn.input"}}
+			delta := journal.Event{Seq: 2, EventInput: journal.EventInput{TurnSeq: 1, Type: "delta"}}
+			reply := journal.Event{Seq: 3, EventInput: journal.EventInput{TurnSeq: 1, Type: "turn.output"}}
+			end := journal.Event{Seq: 4, EventInput: journal.EventInput{TurnSeq: 1, Type: "turn.completed",
+				Payload: journal.Payload{Inline: []byte(`{"turn_seq":1,"end_seq":4,"outcome":"IDLE"}`)}}}
+			upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				query := r.URL.Query()
+				key := query.Get("after_seq") + "/" + query.Get("limit")
+				mu.Lock()
+				defer mu.Unlock()
+				reads = append(reads, key)
+				if remaining > 0 && (tc.failProbe && key == "0/1" || !tc.failProbe && key == "2/128") {
+					remaining--
+					if tc.cancelRead {
+						cancel()
+					}
+					transport.WriteJSON(w, tc.status, &contracts.Error{Code: tc.code})
+					return
+				}
+				switch key {
+				case "0/1":
+					transport.WriteJSON(w, http.StatusOK, journal.EventPage{HeadSeq: 2, Events: []journal.Event{first}})
+				case "0/128":
+					transport.WriteJSON(w, http.StatusOK, journal.EventPage{HeadSeq: 2, Events: []journal.Event{first, delta}})
+				case "2/128":
+					transport.WriteJSON(w, http.StatusOK, journal.EventPage{HeadSeq: 4, Events: []journal.Event{reply, end}})
+				default:
+					transport.WriteJSON(w, http.StatusBadRequest, &contracts.Error{Code: contracts.ErrInvalid})
+				}
+			}))
+			defer upstream.Close()
+			client, err := stateclient.New(stateclient.Config{
+				BaseURL: upstream.URL, HTTPClient: upstream.Client(),
+				TokenSource: func(context.Context) (string, error) { return "state-token", nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope := contracts.Scope{Tenant: "tenant", Deployment: "agent", Subject: "user"}
+			r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/stream?turn_seq=1&after_seq=4", nil)
+			r.Header.Set("Last-Event-ID", "1")
+			w := httptest.NewRecorder()
+			c := Coordinator{}
+			c.stream(w, r, client.Coordinator().ForScope(scope), SessionSignal{Scope: scope, SessionID: "s"})
+			assertSSEFrames(t, w, tc.wantFrames)
+			mu.Lock()
+			defer mu.Unlock()
+			if !slices.Equal(reads, tc.wantReads) {
+				t.Fatalf("State read cursors/limits = %v, want %v", reads, tc.wantReads)
+			}
+		})
+	}
+}
+
+func assertSSEFrames(t *testing.T, response *httptest.ResponseRecorder, want []string) {
+	t.Helper()
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("expected SSE response, got %d (%s) %s", response.Code, response.Header().Get("Content-Type"), response.Body)
+	}
+	var frames []string
+	var id string
+	for line := range strings.SplitSeq(response.Body.String(), "\n") {
+		switch {
+		case strings.HasPrefix(line, "id: "):
+			id = line[4:]
+		case strings.HasPrefix(line, "event: "):
+			frames = append(frames, line[7:]+":"+id)
+			id = ""
+		}
+	}
+	if !slices.Equal(frames, want) {
+		t.Fatalf("SSE frames = %v, want %v\n%s", frames, want, response.Body)
+	}
+}
+
+type observedSSEState struct {
+	State
+	caughtUp chan struct{}
+}
+
+func (s observedSSEState) GetEvents(ctx context.Context, session string, after int64, limit int, ns string) (journal.EventPage, error) {
+	page, err := s.State.GetEvents(ctx, session, after, limit, ns)
+	if err == nil && after == 1 && page.HeadSeq == 1 {
+		select {
+		case s.caughtUp <- struct{}{}:
+		default:
+		}
+	}
+	return page, err
+}
+
+func TestSSELivePostgresSignalAndFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		listen      bool
+		minDuration time.Duration
+		maxDuration time.Duration
+	}{
+		{name: "notification", listen: true, maxDuration: time.Second},
+		{name: "lost notification", minDuration: 1750 * time.Millisecond, maxDuration: 4 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbCtx, pool, db := openPG(t)
+			ctx, cancel := context.WithTimeout(dbCtx, 8*time.Second)
+			defer cancel()
+			const session = "wake"
+			if _, err := db.EnqueueTurn(ctx, journal.EnqueueRequest{
+				SessionID: session, Harness: "go", FormatVersion: 1, Key: "initial",
+				ExecutionMode: journal.ExecutionVMManaged, Input: journal.Payload{Inline: []byte(`{}`)},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			bus := NewPGSignalBus(pool)
+			if tc.listen {
+				busDone := make(chan struct{})
+				go func() {
+					defer close(busDone)
+					bus.Run(ctx)
+				}()
+				defer func() { cancel(); <-busDone }()
+				waitForPostgresSSEListener(t, ctx, pool, bus, SessionSignal{Scope: db.scope, SessionID: "probe"})
+			}
+			state := observedSSEState{State: db, caughtUp: make(chan struct{}, 1)}
+			c := Coordinator{Signals: bus}
+			request := httptest.NewRequestWithContext(ctx, http.MethodGet, "/stream?turn_seq=1", nil)
+			w := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				c.stream(w, request, state, SessionSignal{Scope: db.scope, SessionID: session})
+			}()
+			defer func() { cancel(); <-done }()
+			select {
+			case <-state.caughtUp:
+			case <-done:
+				t.Fatalf("SSE closed before catching up: %s", w.Body)
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			start := time.Now()
+			if _, err := db.CancelSession(ctx, session, 1); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-done:
+			case <-time.After(tc.maxDuration):
+				t.Fatalf("terminal event did not reach SSE within %s", tc.maxDuration)
+			}
+			elapsed := time.Since(start)
+			if elapsed < tc.minDuration || elapsed > tc.maxDuration {
+				t.Fatalf("terminal event reached SSE in %s, want %s–%s", elapsed, tc.minDuration, tc.maxDuration)
+			}
+			t.Logf("terminal event reached SSE in %s", elapsed)
+			assertSSEFrames(t, w, []string{"journal:1", "journal:2", "end:"})
+		})
+	}
+}
+
+func waitForPostgresSSEListener(t *testing.T, ctx context.Context, pool *pgxpool.Pool, bus *PGSignalBus, probe SessionSignal) {
+	t.Helper()
+	ready, release := bus.Subscribe(probe)
+	defer release()
+	payload, err := json.Marshal(probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if _, err := pool.Exec(ctx, "SELECT pg_notify($1,$2)", journal.SessionSignalChannel, string(payload)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-ready:
+			return
+		case <-tick.C:
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
 }
 
 func TestSSEConcurrentReadersLiveTurn(t *testing.T) {

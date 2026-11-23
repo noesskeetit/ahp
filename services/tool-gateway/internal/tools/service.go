@@ -378,51 +378,73 @@ func (s *Service) call(ctx context.Context, scope contracts.Scope, key, tool str
 		// Ordinary guard conflict: a sibling side effect holds the digest guard.
 		return operations.Operation{}, derr
 	}
-	// Durable one-shot authorisation for human-gated tools: the approval bound
-	// to THIS operation is consumed atomically at the point where a fresh
-	// dispatch has just been granted (exactly once per key). No row consumed ->
-	// no effect, whatever happened after the gate read (race, expiry, replay).
-	if spec.RequiresApproval {
-		if cerr := s.TryConsumeApproval(ctx, scope, key, digest, tool); cerr != nil {
-			return operations.Operation{}, cerr
-		}
-	}
-	return s.dispatch(ctx, scope, key, spec, args, binding)
+	return s.dispatch(ctx, scope, key, tool, digest, spec, args, binding)
 }
 
-// dispatch performs the MCP call after dispatch was granted. It settles the
-// ledger on success, fails it on a clean (non-side-effecting) error, and marks
-// SIDE_EFFECT_UNKNOWN when a side-effecting call returns an ambiguous error.
-func (s *Service) dispatch(ctx context.Context, scope contracts.Scope, key string, spec ToolSpec, args json.RawMessage, binding artifacts.Binding) (operations.Operation, error) {
+// Reserve a short independent budget for the guard-preserving fallback even
+// if storing a result or committing its receipt consumes the primary budget.
+const (
+	outcomeWriteTimeout    = 4 * time.Second
+	outcomeFallbackTimeout = time.Second
+)
+
+// dispatch performs the MCP call after dispatch was granted. Only durable
+// outcome writes outlive the caller. An unrecorded outcome keeps the guard.
+func (s *Service) dispatch(ctx context.Context, scope contracts.Scope, key, tool, digest string, spec ToolSpec, args json.RawMessage, binding artifacts.Binding) (op operations.Operation, outcomeErr error) {
+	outcomeContext := context.WithoutCancel(ctx)
+	var client MCPClient
+	defer func() {
+		if client != nil {
+			_ = client.Close()
+		}
+	}()
+	defer func() {
+		switch op.Status {
+		case operations.StatusSucceeded, operations.StatusFailed, operations.StatusSideEffectUnknown:
+			return
+		}
+		fallback, cancel := context.WithTimeout(outcomeContext, outcomeFallbackTimeout)
+		defer cancel()
+		if outcomeErr == nil {
+			outcomeErr = errors.New("tools: dispatch ended without a recorded outcome")
+		}
+		op, outcomeErr = s.markUnknown(fallback, scope, key, outcomeErr)
+	}()
+
+	fail := func(cause error) (operations.Operation, error) {
+		finalize, cancel := context.WithTimeout(outcomeContext, outcomeWriteTimeout)
+		defer cancel()
+		return s.fail(finalize, scope, key, cause)
+	}
+	// A fresh dispatch still needs to consume the one-shot approval before
+	// resolving credentials or invoking the external tool.
+	if spec.RequiresApproval {
+		if err := s.TryConsumeApproval(ctx, scope, key, digest, tool); err != nil {
+			return fail(err)
+		}
+	}
+
 	connector, ok := s.cfg.Connections[spec.Connection]
 	if !ok {
-		return s.fail(ctx, scope, key, contracts.NewError(contracts.ErrNotFound, "tools: connection vanished"))
+		return fail(contracts.NewError(contracts.ErrNotFound, "tools: connection vanished"))
 	}
 	cred, err := s.cfg.Credentials.Resolve(ctx, scope, spec.Connection)
 	if err != nil {
-		return s.fail(ctx, scope, key, fmt.Errorf("tools: resolve credential: %w", err))
+		return fail(fmt.Errorf("tools: resolve credential: %w", err))
 	}
-	client, err := connector(ctx, cred)
+	client, err = connector(ctx, cred)
 	if err != nil {
-		return s.fail(ctx, scope, key, fmt.Errorf("tools: connect: %w", err))
+		return fail(fmt.Errorf("tools: connect: %w", err))
 	}
-	defer func() { _ = client.Close() }()
 
-	res, cerr := client.CallTool(ctx, &mcp.CallToolParams{Name: spec.Name, Arguments: rawToAny(args)})
-	if cerr != nil {
+	res, err := client.CallTool(ctx, &mcp.CallToolParams{Name: spec.Name, Arguments: rawToAny(args)})
+	finalize, cancel := context.WithTimeout(outcomeContext, outcomeWriteTimeout)
+	defer cancel()
+	if err != nil {
 		if spec.SideEffecting {
-			// Ambiguous: the effect may or may not have reached the external
-			// system. Mark UNKNOWN and never auto-replay.
-			if _, merr := s.ledger.MarkUnknown(ctx, scope, key); merr != nil {
-				return operations.Operation{}, fmt.Errorf("tools: mark unknown after call error (%v): %w", cerr, merr)
-			}
-			op, gerr := s.ledger.Get(ctx, scope, key)
-			if gerr != nil {
-				return operations.Operation{}, gerr
-			}
-			return op, fmt.Errorf("tools: side-effect outcome unknown: %w", cerr)
+			return s.markUnknown(finalize, scope, key, fmt.Errorf("tools: side-effect outcome unknown: %w", err))
 		}
-		return s.fail(ctx, scope, key, cerr)
+		return s.fail(finalize, scope, key, err)
 	}
 
 	// A tool that ANSWERS with an error result round-tripped fine but refused or
@@ -431,12 +453,12 @@ func (s *Service) dispatch(ctx context.Context, scope contracts.Scope, key strin
 	// business (an answered error does not prove an effect was absent, so this
 	// must not silently become FAILED for side-effecting tools).
 	if res != nil && res.IsError {
-		outcome := map[string]any{FailureKey: ToolFailure(ctx, toolErrorExcerpt(res))}
+		outcome := map[string]any{FailureKey: ToolFailure(finalize, toolErrorExcerpt(res))}
 		if binding.ContextID != "" {
 			outcome["isError"] = true
 		}
 		payload, _ := json.Marshal(outcome)
-		op, cerr2 := s.ledger.Complete(ctx, scope, key, payload, false)
+		op, cerr2 := s.ledger.Complete(finalize, scope, key, payload, false)
 		if cerr2 != nil {
 			return operations.Operation{}, fmt.Errorf("tools: complete: %w", cerr2)
 		}
@@ -452,22 +474,22 @@ func (s *Service) dispatch(ctx context.Context, scope contracts.Scope, key strin
 	// SIDE_EFFECT_UNKNOWN -- the effect happened, and calling it FAILED would
 	// contradict the ledger's own meaning.
 	if ceiling := s.maxUpstreamBytes(); ceiling > 0 && len(payload) > ceiling {
-		return s.rejectUnstoredResult(ctx, scope, key, spec.SideEffecting,
+		return s.rejectUnstoredResult(finalize, scope, key, spec.SideEffecting,
 			fmt.Errorf("%w: %d bytes over a %d byte ceiling", ErrUpstreamTooLarge, len(payload), ceiling))
 	}
 	// Out-of-line storage for large output: the ledger keeps an immutable
 	// reference and Artifacts keeps the bytes.
-	if ref, spilled, serr := s.storeResult(ctx, scope, binding, key, payload); serr != nil {
-		return s.rejectUnstoredResult(ctx, scope, key, spec.SideEffecting,
+	if ref, spilled, serr := s.storeResult(finalize, scope, binding, key, payload); serr != nil {
+		return s.rejectUnstoredResult(finalize, scope, key, spec.SideEffecting,
 			fmt.Errorf("tools: spill result: %w", serr))
 	} else if spilled {
 		payload = ref
 	}
 	if len(payload) > operations.MaxResultBytes {
-		return s.rejectUnstoredResult(ctx, scope, key, spec.SideEffecting,
+		return s.rejectUnstoredResult(finalize, scope, key, spec.SideEffecting,
 			fmt.Errorf("tools: result exceeds journal limit of %d bytes", operations.MaxResultBytes))
 	}
-	op, err := s.ledger.Complete(ctx, scope, key, payload, false)
+	op, err = s.ledger.Complete(finalize, scope, key, payload, false)
 	if err != nil {
 		return operations.Operation{}, fmt.Errorf("tools: complete: %w", err)
 	}
@@ -480,9 +502,13 @@ func (s *Service) rejectUnstoredResult(ctx context.Context, scope contracts.Scop
 	if !sideEffecting {
 		return s.fail(ctx, scope, key, cause)
 	}
+	return s.markUnknown(ctx, scope, key, cause)
+}
+
+func (s *Service) markUnknown(ctx context.Context, scope contracts.Scope, key string, cause error) (operations.Operation, error) {
 	op, err := s.ledger.MarkUnknown(ctx, scope, key)
 	if err != nil {
-		return operations.Operation{}, fmt.Errorf("tools: mark unknown after result storage failure (%v): %w", cause, err)
+		return op, errors.Join(cause, fmt.Errorf("tools: mark unknown: %w", err))
 	}
 	return op, cause
 }
@@ -495,7 +521,10 @@ func (s *Service) fail(ctx context.Context, scope contracts.Scope, key string, c
 	// server-side handling and never lands in a client-visible payload, while
 	// the human surface still gets a class and an actionable sentence.
 	payload, _ := json.Marshal(map[string]any{FailureKey: ClassifyFailure(ctx, cause)})
-	op, _ := s.ledger.Complete(ctx, scope, key, payload, true)
+	op, err := s.ledger.Complete(ctx, scope, key, payload, true)
+	if err != nil {
+		return op, errors.Join(cause, fmt.Errorf("tools: record failure: %w", err))
+	}
 	return op, cause
 }
 

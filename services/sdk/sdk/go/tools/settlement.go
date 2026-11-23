@@ -27,8 +27,8 @@ type LeasedCall struct {
 }
 
 // SettleLeasedCall recovers a committed intent or makes one permitted Gateway
-// attempt. An unresolved call is returned as DISPATCHED. The caller may keep
-// waiting or explicitly park the turn and reconcile it on a later invocation.
+// attempt. It waits for an in-flight operation only while the turn is live.
+// A canceled attempt may reconcile once; an unresolved intent stays DISPATCHED.
 func (c *Client) SettleLeasedCall(ctx context.Context, store *state.Client, lease *state.VMLease, call LeasedCall) (journal.ToolIntent, error) {
 	if store == nil || lease == nil || ctx == nil || call.CallID == "" || call.Key == "" || call.Tool == "" || !json.Valid(call.Arguments) {
 		return journal.ToolIntent{}, invalid("state client, lease and prepared tool call are required")
@@ -37,10 +37,18 @@ func (c *Client) SettleLeasedCall(ctx context.Context, store *state.Client, leas
 		return journal.ToolIntent{}, err
 	}
 	turn := lease.Current()
-	proof := func() (LeaseProof, error) {
+	currentLease := func() (state.ClaimedTurn, error) {
 		current := lease.Current()
-		if current.SessionID != turn.SessionID || current.Epoch != turn.Epoch || current.InputSeq != turn.InputSeq || current.Worker != turn.Worker {
-			return LeaseProof{}, contracts.NewError(contracts.ErrStaleEpoch, "tool settlement no longer owns this turn")
+		if current.SessionID != turn.SessionID || current.Epoch != turn.Epoch || current.InputSeq != turn.InputSeq || current.Worker != turn.Worker ||
+			!time.Now().Before(current.ExpiresAt) {
+			return state.ClaimedTurn{}, contracts.NewError(contracts.ErrStaleEpoch, "tool settlement no longer owns this turn")
+		}
+		return current, nil
+	}
+	proof := func() (LeaseProof, error) {
+		current, err := currentLease()
+		if err != nil {
+			return LeaseProof{}, err
 		}
 		p := LeaseProof{current.SessionID, current.Epoch, current.ToolLeaseProof}
 		return p, p.validate()
@@ -151,12 +159,66 @@ func (c *Client) SettleLeasedCall(ctx context.Context, store *state.Client, leas
 		}
 	}
 
+	settleLive := func(result FencedLookup) (journal.ToolIntent, error) {
+		if result.Status != LookupInFlight {
+			return settle(ctx, result)
+		}
+		if err := dispatch(ctx); err != nil {
+			return intent, err
+		}
+		const maxBackoff = 200 * time.Millisecond
+		backoff := 10 * time.Millisecond
+		for result.Status == LookupInFlight {
+			current, err := currentLease()
+			if err != nil {
+				return intent, err
+			}
+			pause := time.NewTimer(min(backoff, time.Until(current.ExpiresAt)))
+			select {
+			case <-ctx.Done():
+				pause.Stop()
+				return intent, ctx.Err()
+			case <-pause.C:
+			}
+			if err := ctx.Err(); err != nil {
+				return intent, err
+			}
+			current, err = currentLease() // A heartbeat can renew the proof during backoff.
+			if err != nil {
+				return intent, err
+			}
+			lookupCtx, cancel := context.WithDeadline(ctx, current.ExpiresAt)
+			next, err := lookup(lookupCtx)
+			deadline := lookupCtx.Err()
+			cancel()
+			if ctx.Err() != nil {
+				return intent, ctx.Err()
+			}
+			if _, leaseErr := currentLease(); leaseErr != nil {
+				return intent, leaseErr
+			}
+			backoff = min(backoff*2, maxBackoff)
+			if err != nil {
+				if deadline == context.DeadlineExceeded {
+					// A renewal kept the turn live beyond this lookup's deadline.
+					continue
+				}
+				return intent, err
+			}
+			result = next
+		}
+		if result.Status == LookupSafeToRetry {
+			return intent, unknown("Gateway reported SAFE_TO_RETRY for an in-flight operation")
+		}
+		return settle(ctx, result)
+	}
+
 	result, err := lookup(ctx)
 	if err != nil {
 		return intent, err
 	}
 	if result.Status != LookupSafeToRetry {
-		return settle(ctx, result)
+		return settleLive(result)
 	}
 	if err := dispatch(ctx); err != nil {
 		return intent, err
@@ -193,6 +255,9 @@ func (c *Client) SettleLeasedCall(ctx context.Context, store *state.Client, leas
 	if ctx.Err() == nil {
 		result, err = lookup(ctx)
 		if err == nil {
+			if result.Status == LookupInFlight {
+				return settleLive(result)
+			}
 			settled, settleErr := settle(ctx, result)
 			if settleErr == nil || ctx.Err() == nil {
 				return settled, settleErr

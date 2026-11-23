@@ -1,0 +1,187 @@
+// Included through a Go overlay by the profiling build only.
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"log"
+	"net"
+	"net/http"
+	"net/http/httptrace"
+	"net/http/pprof"
+	"os"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+var (
+	profileEnabled     = os.Getenv("AHP_PROFILE_DEBUG") != ""
+	profilePools       sync.Map
+	profileConnections sync.Map
+	profileBootstrap   atomic.Pointer[func(string) (int64, bool)]
+)
+
+type profileConnCounts struct {
+	fresh         atomic.Uint64
+	reused        atomic.Uint64
+	tlsHandshakes atomic.Uint64
+}
+
+func profilePool(name string, pool *pgxpool.Pool) {
+	if profileEnabled {
+		profilePools.Store(name, pool)
+	}
+}
+
+func profileSetBootstrapLookup(f func(string) (int64, bool)) {
+	profileBootstrap.Store(&f)
+}
+
+type profileTransport struct{ *http.Transport }
+
+func profileTraceTransport(base *http.Transport) http.RoundTripper {
+	if !profileEnabled {
+		return base
+	}
+	return profileTransport{base}
+}
+
+func (t profileTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	key := r.URL.Host
+	value, ok := profileConnections.Load(key)
+	if !ok {
+		value, _ = profileConnections.LoadOrStore(key, new(profileConnCounts))
+	}
+	c := value.(*profileConnCounts)
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			if info.Reused {
+				c.reused.Add(1)
+			} else {
+				c.fresh.Add(1)
+			}
+		},
+		TLSHandshakeStart: func() { c.tlsHandshakes.Add(1) },
+	}
+	return t.Transport.RoundTrip(r.WithContext(httptrace.WithClientTrace(r.Context(), trace)))
+}
+
+func init() {
+	if !profileEnabled {
+		return
+	}
+	addr := os.Getenv("AHP_PROFILE_DEBUG")
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host != "127.0.0.1" {
+		log.Fatal("profiling debug endpoint requires loopback")
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	runtime.SetMutexProfileFraction(10)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
+	mux.HandleFunc("GET /debug/ahp-profile/stats", func(w http.ResponseWriter, r *http.Request) {
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+		pools := make(map[string]any)
+		profilePools.Range(func(k, v any) bool {
+			s := v.(*pgxpool.Pool).Stat()
+			pools[k.(string)] = map[string]any{"acquire_count": s.AcquireCount(), "acquire_duration_ns": s.AcquireDuration().Nanoseconds(),
+				"empty_acquire_count": s.EmptyAcquireCount(), "empty_acquire_wait_ns": s.EmptyAcquireWaitTime().Nanoseconds(),
+				"total_conns": s.TotalConns(), "acquired_conns": s.AcquiredConns(), "idle_conns": s.IdleConns(), "max_conns": s.MaxConns()}
+			return true
+		})
+		connections := make(map[string]any)
+		profileConnections.Range(func(k, v any) bool {
+			c := v.(*profileConnCounts)
+			connections[k.(string)] = map[string]uint64{"fresh": c.fresh.Load(), "reused": c.reused.Load(), "tls_handshakes": c.tlsHandshakes.Load()}
+			return true
+		})
+		_ = json.NewEncoder(w).Encode(map[string]any{"heap_inuse": mem.HeapInuse, "goroutines": runtime.NumGoroutine(),
+			"pools": pools, "upstream_connections": connections})
+	})
+	mux.HandleFunc("GET /debug/ahp-profile/bootstrap", func(w http.ResponseWriter, r *http.Request) {
+		lookup := profileBootstrap.Load()
+		if lookup == nil {
+			http.NotFound(w, r)
+			return
+		}
+		ns, ok := (*lookup)(r.URL.Query().Get("execution_id"))
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]int64{"elapsed_ns": ns})
+	})
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Print(err)
+		}
+	}()
+}
+
+// --- VMRUNTIME TEMPLATE ---
+// Included through a Go overlay by the runtime's profiling build only.
+package vmruntime
+
+import (
+	"os"
+	"sync"
+	"time"
+)
+
+var (
+	profileBootEnabled      = os.Getenv("AHP_PROFILE_BOOT_TIMING") == "true"
+	profileBootObservations sync.Map
+)
+
+type profileBoot struct {
+	mu      sync.Mutex
+	start   time.Time
+	elapsed int64
+}
+
+func profileBootStart(id string) {
+	if profileBootEnabled {
+		profileBootObservations.LoadOrStore(id, &profileBoot{start: time.Now()})
+	}
+}
+
+func profileBootArrive(id string) {
+	arrived := time.Now()
+	if !profileBootEnabled {
+		return
+	}
+	v, ok := profileBootObservations.Load(id)
+	if !ok {
+		return
+	}
+	b := v.(*profileBoot)
+	b.mu.Lock()
+	if b.elapsed == 0 {
+		b.elapsed = arrived.Sub(b.start).Nanoseconds()
+	}
+	b.mu.Unlock()
+}
+
+func ProfileBootstrapNS(id string) (int64, bool) {
+	v, ok := profileBootObservations.Load(id)
+	if !ok {
+		return 0, false
+	}
+	b := v.(*profileBoot)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.elapsed, b.elapsed > 0
+}

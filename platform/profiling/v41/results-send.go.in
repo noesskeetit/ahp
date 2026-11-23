@@ -1,0 +1,126 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"os"
+	"syscall"
+	"unsafe"
+)
+
+// Linux arm64 sockaddr_vm uses a 16-byte native-endian layout.
+type vsockAddress struct {
+	Family uint16
+	Pad    uint16
+	Port   uint32
+	CID    uint32
+	Flags  uint8
+	Zero   [3]byte
+}
+
+func send(path string) error {
+	const (
+		afVsock     = 40
+		resultLimit = 256 << 20
+		magic       = "AHPV41R1"
+	)
+	archive, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer archive.Close()
+	info, err := archive.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > resultLimit {
+		return fmt.Errorf("expected a regular results archive of at most %d bytes", resultLimit)
+	}
+	digest := sha256.New()
+	if _, err := io.CopyN(digest, archive, info.Size()); err != nil {
+		return fmt.Errorf("hash results: %w", err)
+	}
+	if _, err := archive.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	var header [len(magic) + 8 + sha256.Size]byte
+	copy(header[:], magic)
+	binary.BigEndian.PutUint64(header[len(magic):], uint64(info.Size()))
+	copy(header[len(magic)+8:], digest.Sum(nil))
+
+	fd, err := syscall.Socket(afVsock, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	conn := os.NewFile(uintptr(fd), "host-results")
+	defer conn.Close()
+	timeout := syscall.Timeval{Sec: 90}
+	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &timeout); err != nil {
+		return err
+	}
+	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &timeout); err != nil {
+		return err
+	}
+	address := vsockAddress{Family: afVsock, CID: 2, Port: 29617}
+	_, _, errno := syscall.Syscall(syscall.SYS_CONNECT, uintptr(fd), uintptr(unsafe.Pointer(&address)), unsafe.Sizeof(address))
+	if errno != 0 {
+		return errno
+	}
+	if _, err := conn.Write(header[:]); err != nil {
+		return fmt.Errorf("send results header: %w", err)
+	}
+	if _, err := io.CopyN(conn, archive, info.Size()); err != nil {
+		return fmt.Errorf("send results archive: %w", err)
+	}
+	var ack [1]byte
+	if _, err := io.ReadFull(conn, ack[:]); err != nil {
+		return fmt.Errorf("read results acknowledgment: %w", err)
+	}
+	if ack[0] != '1' {
+		return fmt.Errorf("host failed to persist the results")
+	}
+	return nil
+}
+
+func probeKVM() error {
+	device, err := os.OpenFile("/dev/kvm", os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer device.Close()
+	const kvmGetAPIVersion = 0xAE00
+	const kvmCreateVM = 0xAE01
+	version, _, errno := syscall.Syscall(syscall.SYS_IOCTL, device.Fd(), kvmGetAPIVersion, 0)
+	if errno != 0 {
+		return errno
+	}
+	if version != 12 {
+		return fmt.Errorf("unexpected KVM API version %d", version)
+	}
+	vm, _, errno := syscall.Syscall(syscall.SYS_IOCTL, device.Fd(), kvmCreateVM, 0)
+	if errno != 0 {
+		return errno
+	}
+	syscall.Close(int(vm))
+	fmt.Printf("kvm_api_version=%d\nkvm_create_vm=ok\n", version)
+	return nil
+}
+
+func main() {
+	if len(os.Args) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: profile-results-send {probe-kvm|archive.tar.gz}")
+		os.Exit(2)
+	}
+	var err error
+	if os.Args[1] == "probe-kvm" {
+		err = probeKVM()
+	} else {
+		err = send(os.Args[1])
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}

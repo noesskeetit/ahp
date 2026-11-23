@@ -1,0 +1,43 @@
+// Included only in the State API profiling build through a Go overlay.
+package statejournal
+
+import (
+	"fmt"
+	"log"
+	"os"
+
+	"github.com/ahp-platform/ahp/pkg/contracts/journal"
+	"golang.org/x/sys/unix"
+)
+
+var profileFinishTrace = openProfileFinishTrace()
+
+func openProfileFinishTrace() *os.File {
+	path := os.Getenv("AHP_PROFILE_FINISH_TRACE")
+	if path == "" {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return f
+}
+
+func profileFinishCommitted(session string, turn int64, control *journal.TurnControlDelta) {
+	if profileFinishTrace == nil {
+		return
+	}
+	var now unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &now); err != nil {
+		log.Printf("profiling the committed turn clock: %v", err)
+		return
+	}
+	var next int64
+	if control != nil && control.NextTurn != nil {
+		next = control.NextTurn.InputSeq
+	}
+	if _, err := fmt.Fprintf(profileFinishTrace, "%s\t%d\t%d\t%d\n", session, turn, next, now.Nano()); err != nil {
+		log.Printf("profiling the committed turn write: %v", err)
+	}
+}

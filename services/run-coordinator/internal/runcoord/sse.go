@@ -1,6 +1,7 @@
 package runcoord
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -40,12 +41,18 @@ func (c *Coordinator) stream(w http.ResponseWriter, r *http.Request, state State
 		cursor = max(turn-1, start-1)
 	}
 	var signal <-chan struct{}
+	pollInterval := 250 * time.Millisecond
 	if c.Signals != nil {
 		var release func()
 		signal, release = c.Signals.Subscribe(session)
 		defer release()
+		pollInterval = 2500 * time.Millisecond
 	}
-	if _, err := state.GetEvents(ctx, session.SessionID, cursor, 1, ""); err != nil {
+	_, err = readStreamEvents(ctx, state, session.SessionID, cursor, 1)
+	if ctx.Err() != nil {
+		return
+	}
+	if err != nil {
 		transport.WriteError(w, r, err)
 		return
 	}
@@ -53,7 +60,7 @@ func (c *Coordinator) stream(w http.ResponseWriter, r *http.Request, state State
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher.Flush()
-	poll := time.NewTicker(250 * time.Millisecond)
+	poll := time.NewTicker(pollInterval)
 	defer poll.Stop()
 	keepalive := time.NewTicker(15 * time.Second)
 	defer keepalive.Stop()
@@ -74,13 +81,19 @@ func (c *Coordinator) stream(w http.ResponseWriter, r *http.Request, state State
 		return true
 	}
 	for {
-		page, err := state.GetEvents(ctx, session.SessionID, cursor, 128, "")
+		page, err := readStreamEvents(ctx, state, session.SessionID, cursor, 128)
+		if ctx.Err() != nil {
+			return
+		}
 		if err != nil {
 			write("error", 0, map[string]string{"code": "STATE_READ_FAILED"})
 			return
 		}
 		if !continuous(page, cursor) {
 			page, err = state.GetEvents(ctx, session.SessionID, cursor, 128, "")
+			if ctx.Err() != nil {
+				return
+			}
 			if err != nil || !continuous(page, cursor) {
 				write("error", 0, map[string]any{"code": "INCOMPLETE_TAIL", "expected_seq": cursor + 1})
 				return
@@ -119,6 +132,18 @@ func (c *Coordinator) stream(w http.ResponseWriter, r *http.Request, state State
 			flusher.Flush()
 		}
 	}
+}
+
+func readStreamEvents(ctx context.Context, state State, session string, cursor int64, limit int) (journal.EventPage, error) {
+	if err := ctx.Err(); err != nil {
+		return journal.EventPage{}, err
+	}
+	page, err := state.GetEvents(ctx, session, cursor, limit, "")
+	// The State SDK surfaces interrupted reads as UNAVAILABLE.
+	if ctx.Err() == nil && contracts.Code(err) == contracts.ErrUnavailable {
+		return state.GetEvents(ctx, session, cursor, limit, "")
+	}
+	return page, err
 }
 
 func streamCursor(value string) (int64, error) {

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -556,5 +557,33 @@ func TestLeaseDispatchRechecksEpochAfterGatewayPrecheck(t *testing.T) {
 		CallProvenance{TaskID: "new", ContextID: second.ContextID}, second)
 	if err != nil || op.Status != operations.StatusSucceeded || atomic.LoadInt32(e.effCount) != 1 {
 		t.Fatalf("new call=%+v err=%v effects=%d", op, err, atomic.LoadInt32(e.effCount))
+	}
+}
+
+func TestDispatchPreservesFailureAndGuardWhenFailureWriteFails(t *testing.T) {
+	e, ctx := newTestService(t)
+	_, err := e.svc.pool.Exec(ctx, "ALTER TABLE "+e.schema+".operations ADD CONSTRAINT reject_failed CHECK (status <> 'FAILED')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cause := errors.New("test: could not open upstream session")
+	e.svc.cfg.Connections["c"] = func(context.Context, Credential) (MCPClient, error) {
+		return nil, cause
+	}
+	args := json.RawMessage(`{}`)
+	digest, err := ApprovalDigest("write", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.g.AllowDigest(digest)
+	op, err := e.svc.Call(ctx, e.scope, "failure", "write", args)
+	var pgErr *pgconn.PgError
+	if !errors.Is(err, cause) || !errors.As(err, &pgErr) || pgErr.ConstraintName != "reject_failed" {
+		t.Fatalf("expected connector cause and ledger failure, got %v", err)
+	}
+	durable, err := e.svc.Get(ctx, e.scope, "failure")
+	if err != nil || op.Status != operations.StatusSideEffectUnknown ||
+		durable.Status != operations.StatusSideEffectUnknown || durable.Guard != digest {
+		t.Fatalf("failure fallback did not preserve the guard: %s / %s / %s (%v)", op.Status, durable.Status, durable.Guard, err)
 	}
 }

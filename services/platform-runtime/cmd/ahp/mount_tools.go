@@ -10,9 +10,13 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/ahp-platform/ahp/internal/identity"
 	"github.com/ahp-platform/ahp/internal/model/secretstore"
@@ -258,42 +262,44 @@ func (s *server) tryMountTools(ctx context.Context, mux *http.ServeMux,
 		s.logger.Warn("tools credentials=dev-static (one bearer for every connection); set AHP_TOOLS_VAULT_PATHS for per-connection Vault credentials")
 	}
 
+	staticMCP := newMCPTransportPool(caPool, mcpIdleConnTimeout)
 	conns := make(map[string]tools.Connector, len(cfg.Connections))
 	for name, endpoint := range cfg.Connections {
-		endpoint := endpoint
-		connectionName := name
-		var egressClient *http.Client
-		_, exchangedConnection := cfg.Exchange[name]
-		if _, personalConnection := cfg.OAuth[name]; personalConnection || exchangedConnection {
-			policy, ok := cfg.Egress[name]
-			if !ok || len(policy.AllowedPathPrefixes) == 0 {
-				return fmt.Errorf("tools: OAuth MCP connection requires registered domain/method/path egress")
-			}
-			egressClient, err = netpolicy.NewClient(policy)
+		_, exchanged := cfg.Exchange[name]
+		_, personal := cfg.OAuth[name]
+		if !personal && !exchanged {
+			connector, err := staticMCP.connector(endpoint)
 			if err != nil {
 				return err
 			}
-			egressClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+			conns[name] = connector
+			continue
 		}
+		policy, ok := cfg.Egress[name]
+		if !ok || len(policy.AllowedPathPrefixes) == 0 {
+			return fmt.Errorf("tools: OAuth MCP connection requires registered domain/method/path egress")
+		}
+		egressClient, err := netpolicy.NewClient(policy)
+		if err != nil {
+			return err
+		}
+		egressClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		conns[name] = func(ctx context.Context, cred tools.Credential) (tools.MCPClient, error) {
-			if egressClient != nil {
-				p, ok := transport.FromContext(ctx)
-				if !ok || p.Claims.Kind != auth.KindTask {
-					return nil, contracts.NewError(contracts.ErrForbidden, "tools: verified task required")
-				}
-				if err := authorize(ctx, p.Claims, "tools"); err != nil {
+			p, ok := transport.FromContext(ctx)
+			if !ok || p.Claims.Kind != auth.KindTask {
+				return nil, contracts.NewError(contracts.ErrForbidden, "tools: verified task required")
+			}
+			if err := authorize(ctx, p.Claims, "tools"); err != nil {
+				return nil, err
+			}
+			if s.iam != nil {
+				if err := connectionAuthority(ctx, p.Scope, name); err != nil {
 					return nil, err
 				}
-				if s.iam != nil {
-					if err := connectionAuthority(ctx, p.Scope, connectionName); err != nil {
-						return nil, err
-					}
-				}
-				client := *egressClient
-				client.Transport = bearerInjector{base: client.Transport, bearer: cred.Bearer}
-				return connectMCPWithClient(ctx, endpoint, &client)
 			}
-			return connectMCP(ctx, endpoint, cred, caPool)
+			client := *egressClient
+			client.Transport = bearerInjector{base: client.Transport, bearer: cred.Bearer}
+			return connectMCPWithClient(ctx, endpoint, &client)
 		}
 	}
 	// Read-time revalidation of personal grants for GetResult. Guarded
@@ -341,6 +347,7 @@ func (s *server) tryMountTools(ctx context.Context, mux *http.ServeMux,
 	if err != nil {
 		return fmt.Errorf("tools handler: %w", err)
 	}
+	context.AfterFunc(ctx, staticMCP.closeIdleConnections)
 	mux.Handle("/v1/tools/", handler)
 	s.logger.Info("tools plane mounted prefix=/v1/tools/", "schema", schema, "tools", len(cfg.Tools), "connections", len(cfg.Connections), "credentials", credSource)
 	return nil
@@ -396,18 +403,81 @@ func (r devToolsResolver) Resolve(context.Context, contracts.Scope, string) (too
 	return tools.Credential{Bearer: r.bearer}, nil
 }
 
-// connectMCP opens a real MCP session to a streamable-HTTP endpoint. When a CA
-// pool is configured (mTLS to the tool server) the client presents the front's
-// own certificate and pins that CA; otherwise it trusts the system roots. Only
-// the resolved bearer (plus any mTLS material) reaches the tool server.
-func connectMCP(ctx context.Context, endpoint string, cred tools.Credential, caPool *x509.CertPool) (tools.MCPClient, error) {
-	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	if caPool != nil {
-		tlsCfg.RootCAs = caPool
+const (
+	mcpIdleConnTimeout = 30 * time.Second
+	mcpMaxIdleConns    = 64
+)
+
+type mcpEndpointKey struct {
+	origin, path, query string
+	forceQuery          bool
+}
+
+// Each pool owns one immutable TLS trust profile. Its endpoint index is built
+// at mount time; concurrent invocations share only the resulting transports.
+type mcpTransportPool struct {
+	roots       *x509.CertPool
+	idleTimeout time.Duration
+	endpoints   map[mcpEndpointKey]*http.Transport
+}
+
+func newMCPTransportPool(roots *x509.CertPool, idleTimeout time.Duration) *mcpTransportPool {
+	if roots != nil {
+		roots = roots.Clone()
 	}
-	base := &http.Transport{TLSClientConfig: tlsCfg}
-	httpClient := &http.Client{Transport: bearerInjector{base: base, bearer: cred.Bearer}}
-	return connectMCPWithClient(ctx, endpoint, httpClient)
+	return &mcpTransportPool{
+		roots: roots, idleTimeout: idleTimeout, endpoints: make(map[mcpEndpointKey]*http.Transport),
+	}
+}
+
+func (p *mcpTransportPool) connector(endpoint string) (tools.Connector, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return nil, fmt.Errorf("tools: invalid MCP endpoint")
+	}
+	key := mcpEndpointKey{origin: mcpOrigin(u), path: u.EscapedPath(), query: u.RawQuery, forceQuery: u.ForceQuery}
+	if key.path == "" {
+		key.path = "/"
+	}
+	base := p.endpoints[key]
+	if base == nil {
+		base = &http.Transport{
+			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: p.roots},
+			MaxIdleConns:        mcpMaxIdleConns,
+			MaxIdleConnsPerHost: mcpMaxIdleConns,
+			IdleConnTimeout:     p.idleTimeout,
+		}
+		p.endpoints[key] = base
+	}
+	return func(ctx context.Context, cred tools.Credential) (tools.MCPClient, error) {
+		client := &http.Client{Transport: bearerInjector{base: base, bearer: cred.Bearer, origin: key.origin}}
+		return connectMCPWithClient(ctx, endpoint, client)
+	}, nil
+}
+
+func (p *mcpTransportPool) closeIdleConnections() {
+	for _, base := range p.endpoints {
+		base.CloseIdleConnections()
+	}
+}
+
+func mcpOrigin(u *url.URL) string {
+	host := u.Hostname()
+	if ip, err := netip.ParseAddr(host); err == nil {
+		host = ip.String()
+	} else {
+		host = strings.ToLower(host)
+	}
+	port := u.Port()
+	if port == "" {
+		switch u.Scheme {
+		case "http":
+			port = "80"
+		case "https":
+			port = "443"
+		}
+	}
+	return u.Scheme + "://" + net.JoinHostPort(host, port)
 }
 
 func connectMCPWithClient(ctx context.Context, endpoint string, httpClient *http.Client) (tools.MCPClient, error) {
@@ -436,10 +506,11 @@ func (m mcpClient) Close() error { return m.cs.Close() }
 type bearerInjector struct {
 	base   http.RoundTripper
 	bearer string
+	origin string // optional origin restriction for clients that follow redirects
 }
 
 func (b bearerInjector) RoundTrip(r *http.Request) (*http.Response, error) {
-	if b.bearer != "" {
+	if b.bearer != "" && (b.origin == "" || b.origin == mcpOrigin(r.URL)) {
 		r2 := r.Clone(r.Context())
 		r2.Header.Set("Authorization", "Bearer "+b.bearer)
 		return b.base.RoundTrip(r2)
@@ -447,8 +518,8 @@ func (b bearerInjector) RoundTrip(r *http.Request) (*http.Response, error) {
 	return b.base.RoundTrip(r)
 }
 
-// toolsTrustPool builds the CA pool for mTLS to tool servers, or nil when the
-// deployment does not pin a tool CA (system roots are used then).
+// toolsTrustPool builds the pinned CA trust profile for tool servers. A nil
+// pool uses system roots.
 func toolsTrustPool() (*x509.CertPool, error) {
 	caFile := envOr("AHP_TOOLS_CLIENT_CA", "")
 	if caFile == "" {
