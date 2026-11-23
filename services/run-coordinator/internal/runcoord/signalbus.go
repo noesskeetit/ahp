@@ -22,15 +22,6 @@ func NewPGSignalBus(pool *pgxpool.Pool) *PGSignalBus {
 	return &PGSignalBus{pool: pool, subscribers: make(map[SessionSignal]map[chan struct{}]struct{})}
 }
 
-func (b *PGSignalBus) Notify(ctx context.Context, signal SessionSignal) error {
-	raw, err := json.Marshal(signal)
-	if err != nil {
-		return err
-	}
-	_, err = b.pool.Exec(ctx, "SELECT pg_notify($1,$2)", journal.SessionSignalChannel, string(raw))
-	return err
-}
-
 func (b *PGSignalBus) Subscribe(signal SessionSignal) (<-chan struct{}, func()) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

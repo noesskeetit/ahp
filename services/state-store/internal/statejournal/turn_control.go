@@ -225,13 +225,23 @@ func (s *Store) CancelTurn(ctx context.Context, scope contracts.Scope, session s
 	}
 	switch status.Status {
 	case SessionQueued:
-		_, err = finishManagedTurn(ctx, tx, scope, session, "INTERRUPTED", Lease{}, status.HeadSeq, turn)
+		if _, err := finishManagedTurn(ctx, tx, scope, session, "INTERRUPTED", Lease{}, status.HeadSeq, turn); err != nil {
+			return TurnStatus{}, err
+		}
 		status.Status, status.HeadSeq, status.InputSeq = "INTERRUPTED", status.HeadSeq+1, nil
 	case SessionActive:
-		_, err = tx.Exec(ctx, `UPDATE ahp_journal.sessions SET cancel_requested=true,updated_at=clock_timestamp()
-			WHERE tenant_id=$1 AND session_id=$2`, scope.Tenant, session)
+		tag, err := tx.Exec(ctx, `UPDATE ahp_journal.sessions SET cancel_requested=true,updated_at=clock_timestamp()
+			WHERE tenant_id=$1 AND session_id=$2 AND NOT cancel_requested`, scope.Tenant, session)
+		if err != nil {
+			return TurnStatus{}, err
+		}
+		if tag.RowsAffected() == 0 {
+			return status, nil
+		}
+	default:
+		return status, nil
 	}
-	if err != nil {
+	if err := notifyJournal(ctx, tx, scope, session); err != nil {
 		return TurnStatus{}, err
 	}
 	return status, tx.Commit(ctx)

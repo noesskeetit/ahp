@@ -181,6 +181,7 @@ type EnqueueRequest struct {
 }
 
 type EnqueueReceipt struct {
+	Replayed      bool   `json:"replayed,omitempty"`
 	Status        string `json:"session_status,omitempty"`
 	AcceptedMode  string `json:"accepted_mode,omitempty"`
 	FollowupCount int    `json:"followup_count,omitempty"`

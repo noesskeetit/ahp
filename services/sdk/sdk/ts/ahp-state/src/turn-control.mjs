@@ -1,6 +1,10 @@
-// Queue control rows occupy the journal sequence but are not native session records.
+// Queue control and SDK completion rows are outside the native session format.
 export function isTurnControl(record) {
   if (record.codec !== 'json' || record.parent_id) return false;
+  if (record.type === 'turn.output') {
+    return record.role === 'assistant' && Number.isSafeInteger(record.turn_seq) && record.turn_seq > 0 &&
+      record.id === `turn.output:${record.turn_seq}`;
+  }
   if (record.type === 'turn.completed') {
     return (record.role === 'assistant' || (record.role === 'system' && record.turn_seq > 0)) &&
       /^turn\.completed:[1-9][0-9]*$/.test(record.id);

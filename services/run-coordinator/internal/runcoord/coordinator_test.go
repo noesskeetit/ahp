@@ -19,8 +19,14 @@ type recoveryState struct {
 	events  []journal.Event
 }
 
-func (s recoveryState) ListRecoverableVMSessions(context.Context) ([]journal.VMSession, error) {
-	return s.pending, nil
+func (s recoveryState) ListRecoverableVMPage(_ context.Context, status string, _ *journal.VMReconcileCursor) (journal.VMReconcilePage, error) {
+	var page journal.VMReconcilePage
+	for _, session := range s.pending {
+		if session.Status == status {
+			page.Sessions = append(page.Sessions, session)
+		}
+	}
+	return page, nil
 }
 
 func (s recoveryState) RequeueFencedVMTurn(_ context.Context, _ string, _ journal.FenceRequeueRequest) error {

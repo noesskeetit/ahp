@@ -304,6 +304,7 @@ export type KVMutation = {
 export interface MutateKVRequest {
   session_id: string;
   lease_epoch: number;
+  turn_seq?: number;
   key: string;
   expected_seq?: number;
   kv?: readonly KVMutation[];

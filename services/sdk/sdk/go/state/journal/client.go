@@ -323,14 +323,20 @@ func (c *Client) GetKV(ctx context.Context, session, scopeType, namespace, key s
 }
 
 func (c *Client) MutateKV(ctx context.Context, session string, epoch, expectedSeq int64, key string, changes []KVMutation) (AppendReceipt, error) {
+	return c.MutateTurnKV(ctx, session, epoch, 0, expectedSeq, key, changes)
+}
+
+// MutateTurnKV applies a KV batch within the specified active VM-managed turn.
+func (c *Client) MutateTurnKV(ctx context.Context, session string, epoch, turnSeq, expectedSeq int64, key string, changes []KVMutation) (AppendReceipt, error) {
 	var result AppendReceipt
 	request := struct {
 		Session string       `json:"session_id"`
 		Epoch   int64        `json:"lease_epoch"`
+		TurnSeq int64        `json:"turn_seq,omitempty"`
 		Seq     int64        `json:"expected_seq"`
 		Key     string       `json:"key"`
 		KV      []KVMutation `json:"kv"`
-	}{session, epoch, expectedSeq, key, changes}
+	}{session, epoch, turnSeq, expectedSeq, key, changes}
 	err := c.http.Call(ctx, "/v1/state/kv:mutate", request, &result, true)
 	return result, err
 }

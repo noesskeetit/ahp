@@ -58,7 +58,13 @@ func enqueueManagedTurn(ctx context.Context, tx pgx.Tx, scope contracts.Scope, r
 		    cancel_requested=CASE WHEN $7 THEN false ELSE cancel_requested END
 		WHERE tenant_id=$1 AND session_id=$2`,
 		scope.Tenant, req.SessionID, seq, status, current, followups, mode == journal.DeliveryTurn)
-	return receipt, err
+	if err != nil {
+		return EnqueueReceipt{}, err
+	}
+	if err := notifyJournal(ctx, tx, scope, req.SessionID); err != nil {
+		return EnqueueReceipt{}, err
+	}
+	return receipt, nil
 }
 
 func (s *Store) ClaimVMTurn(ctx context.Context, scope contracts.Scope, session string, req journal.VMTurnClaimRequest, ttl time.Duration) (TurnLease, error) {
@@ -111,26 +117,57 @@ func (s *Store) RequeueFencedVMTurn(ctx context.Context, scope contracts.Scope, 
 	return err
 }
 
-func (s *Store) ListRecoverableVMSessions(ctx context.Context, scope contracts.Scope, limit int) ([]journal.VMSession, error) {
+func (s *Store) ListRecoverableVMPage(ctx context.Context, scope contracts.Scope, status string, after *journal.VMReconcileCursor, limit int) (journal.VMReconcilePage, error) {
+	var result journal.VMReconcilePage
 	if err := scope.Validate(); err != nil {
-		return nil, err
+		return result, err
 	}
 	if limit < 1 || limit > 1000 {
-		return nil, contracts.NewError(contracts.ErrInvalid, "invalid VM reconcile limit")
+		return result, contracts.NewError(contracts.ErrInvalid, "invalid VM reconcile limit")
 	}
+	var timestamp, ready string
+	switch status {
+	case SessionQueued:
+		timestamp, ready = "queued_at", "status='QUEUED' AND queued_at<=statement_timestamp()-interval '2 seconds'"
+	case SessionActive:
+		timestamp, ready = "lease_expires_at", "status='ACTIVE' AND turn_input_seq IS NOT NULL AND lease_expires_at<=statement_timestamp()"
+	default:
+		return result, contracts.NewError(contracts.ErrInvalid, "invalid VM reconcile status")
+	}
+
+	var cursorTime *time.Time
+	var cursorID string
+	if after != nil {
+		if after.At.IsZero() || !validID(after.SessionID) {
+			return result, contracts.NewError(contracts.ErrInvalid, "invalid VM reconcile cursor")
+		}
+		cursorTime, cursorID = &after.At, after.SessionID
+	}
+
 	rows, err := s.pool.Query(ctx, `
-		SELECT session_id,turn_input_seq,lease_epoch,coalesce(lease_owner,''),status,harness_type
+		SELECT session_id,turn_input_seq,lease_epoch,coalesce(lease_owner,''),status,harness_type,`+timestamp+`
 		FROM ahp_journal.sessions
 		WHERE tenant_id=$1 AND deployment_id=$2 AND subject_id=$3 AND execution_mode='vm_managed'
-		  AND ((status='QUEUED' AND queued_at<=statement_timestamp()-interval '2 seconds')
-		    OR (status='ACTIVE' AND turn_input_seq IS NOT NULL AND lease_expires_at<=statement_timestamp()))
-		ORDER BY updated_at,session_id LIMIT $4`, scope.Tenant, scope.Deployment, scope.Subject, limit)
+		  AND `+ready+`
+		  AND ($4::timestamptz IS NULL OR (`+timestamp+`,session_id)>($4,$5))
+		ORDER BY `+timestamp+`,session_id LIMIT $6`, scope.Tenant, scope.Deployment, scope.Subject, cursorTime, cursorID, limit+1)
 	if err != nil {
-		return nil, err
-	}
-	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (journal.VMSession, error) {
-		result := journal.VMSession{Scope: scope}
-		err := row.Scan(&result.SessionID, &result.TurnSeq, &result.Epoch, &result.ExecutionID, &result.Status, &result.Harness)
 		return result, err
-	})
+	}
+	defer rows.Close()
+	result.Sessions = make([]journal.VMSession, 0, limit)
+	var last journal.VMReconcileCursor
+	for rows.Next() {
+		if len(result.Sessions) == limit {
+			result.Next = &last
+			break
+		}
+		session := journal.VMSession{Scope: scope}
+		if err := rows.Scan(&session.SessionID, &session.TurnSeq, &session.Epoch, &session.ExecutionID, &session.Status, &session.Harness, &last.At); err != nil {
+			return journal.VMReconcilePage{}, err
+		}
+		last.SessionID = session.SessionID
+		result.Sessions = append(result.Sessions, session)
+	}
+	return result, rows.Err()
 }

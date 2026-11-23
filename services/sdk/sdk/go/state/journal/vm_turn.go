@@ -1,6 +1,12 @@
 package journal
 
-import "context"
+import (
+	"context"
+	"net/url"
+	"time"
+
+	"github.com/ahp-platform/ahp/pkg/contracts/journal"
+)
 
 func (c *Client) ClaimVMTurn(ctx context.Context, session string, req VMTurnClaimRequest) (ClaimedTurn, error) {
 	var turn ClaimedTurn
@@ -21,8 +27,13 @@ func (c *Client) CancelSession(ctx context.Context, session string, turnSeq int6
 	return status, err
 }
 
-func (c *Client) ListRecoverableVMSessions(ctx context.Context) ([]VMSession, error) {
-	var sessions []VMSession
-	err := c.get(ctx, "/internal/v1/state/vm-reconcile", nil, &sessions)
-	return sessions, err
+func (c *Client) ListRecoverableVMPage(ctx context.Context, status string, after *journal.VMReconcileCursor) (journal.VMReconcilePage, error) {
+	var page journal.VMReconcilePage
+	query := url.Values{"status": {status}}
+	if after != nil {
+		query.Set("after", after.At.Format(time.RFC3339Nano))
+		query.Set("after_session", after.SessionID)
+	}
+	err := c.get(ctx, "/internal/v1/state/vm-reconcile", query, &page)
+	return page, err
 }

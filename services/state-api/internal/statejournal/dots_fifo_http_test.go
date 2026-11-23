@@ -178,5 +178,7 @@ func TestDotsFIFOHTTPVerifiedTask(t *testing.T) {
 			t.Fatalf("unexpected VM claim: %+v", turn)
 		}
 	})
-
+	t.Run("VM-managed turn through the Go SDK", func(t *testing.T) {
+		testVMManagedTurnSDK(t, httpPlain, scope, token)
+	})
 }

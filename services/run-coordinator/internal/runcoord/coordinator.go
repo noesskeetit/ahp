@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ahp-platform/ahp/pkg/contracts"
@@ -20,7 +21,7 @@ type State interface {
 	InspectSession(context.Context, string) (journal.ResumeState, error)
 	GetEvents(context.Context, string, int64, int, string) (journal.EventPage, error)
 	CancelSession(context.Context, string, int64) (journal.TurnStatus, error)
-	ListRecoverableVMSessions(context.Context) ([]journal.VMSession, error)
+	ListRecoverableVMPage(context.Context, string, *journal.VMReconcileCursor) (journal.VMReconcilePage, error)
 	RequeueFencedVMTurn(context.Context, string, journal.FenceRequeueRequest) error
 }
 
@@ -41,7 +42,6 @@ type VMDispatcher interface {
 type SessionSignal = journal.SessionSignal
 
 type SignalBus interface {
-	Notify(context.Context, SessionSignal) error
 	Subscribe(SessionSignal) (<-chan struct{}, func())
 }
 
@@ -53,17 +53,41 @@ type Coordinator struct {
 }
 
 func (c *Coordinator) Reconcile(ctx context.Context) error {
-	sessions, err := c.State.ListRecoverableVMSessions(ctx)
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for _, session := range sessions {
-		if err := c.reconcileTurn(ctx, session); err != nil {
-			errs = append(errs, fmt.Errorf("reconcile %s: %w", session.SessionID, err))
+	return errors.Join(c.reconcileStatus(ctx, "QUEUED"), c.reconcileStatus(ctx, "ACTIVE"))
+}
+
+func (c *Coordinator) reconcileStatus(ctx context.Context, status string) error {
+	var cursor *journal.VMReconcileCursor
+	var firstErr error
+	var failures int
+	for ctx.Err() == nil {
+		page, err := c.State.ListRecoverableVMPage(ctx, status, cursor)
+		if err != nil {
+			return errors.Join(firstErr, err)
 		}
+		for _, session := range page.Sessions {
+			if ctx.Err() != nil {
+				break
+			}
+			if err := c.reconcileTurn(ctx, session); err != nil {
+				failures++
+				if firstErr == nil {
+					firstErr = fmt.Errorf("reconcile %s: %w", session.SessionID, err)
+				}
+			}
+		}
+		if page.Next == nil {
+			break
+		}
+		if cursor != nil && *page.Next == *cursor {
+			return errors.Join(firstErr, errors.New("VM reconcile cursor did not advance"))
+		}
+		cursor = page.Next
 	}
-	return errors.Join(errs...)
+	if firstErr != nil {
+		return fmt.Errorf("%d %s VM reconciliations failed: %w", failures, status, firstErr)
+	}
+	return ctx.Err()
 }
 
 func (c *Coordinator) reconcileTurn(ctx context.Context, s journal.VMSession) error {
@@ -98,18 +122,24 @@ func (c *Coordinator) reconcileTurn(ctx context.Context, s journal.VMSession) er
 }
 
 func (c *Coordinator) RunReconcile(ctx context.Context, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		if err := c.Reconcile(ctx); err != nil && ctx.Err() == nil {
-			slog.Warn("run coordinator reconcile will retry", "error", err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
+	var sweeps sync.WaitGroup
+	for _, status := range []string{"QUEUED", "ACTIVE"} {
+		sweeps.Go(func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				if err := c.reconcileStatus(ctx, status); err != nil && ctx.Err() == nil {
+					slog.Warn("run coordinator reconcile will retry", "status", status, "error", err)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		})
 	}
+	sweeps.Wait()
 }
 
 func (c *Coordinator) Handler() http.Handler {
@@ -153,7 +183,19 @@ func (c *Coordinator) action(w http.ResponseWriter, r *http.Request) {
 			request.DeliveryMode = journal.DeliveryFollowup
 		}
 		receipt, err := c.State.EnqueueTurn(r.Context(), request)
-		c.write(w, r, session, http.StatusAccepted, receipt, err)
+		if err == nil && c.Dispatcher != nil && !receipt.Replayed &&
+			receipt.AcceptedMode == journal.DeliveryTurn && receipt.Status == "QUEUED" {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			err := c.reconcileTurn(ctx, journal.VMSession{
+				Scope: c.Scope, SessionID: session, Harness: request.Harness,
+				TurnSeq: receipt.HeadSeq, Epoch: receipt.Epoch, Status: receipt.Status,
+			})
+			cancel()
+			if err != nil {
+				slog.Warn("initial VM dispatch will be retried", "session", session, "error", err)
+			}
+		}
+		writeActionResult(w, r, receipt, err)
 	case "cancel":
 		var request struct {
 			TurnSeq int64 `json:"turn_seq,omitempty"`
@@ -163,7 +205,7 @@ func (c *Coordinator) action(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		status, err := c.State.CancelSession(r.Context(), session, request.TurnSeq)
-		c.write(w, r, session, http.StatusAccepted, status, err)
+		writeActionResult(w, r, status, err)
 	default:
 		transport.WriteError(w, r, contracts.NewError(contracts.ErrNotFound, "unknown session action"))
 	}
@@ -190,17 +232,10 @@ func (c *Coordinator) status(w http.ResponseWriter, r *http.Request) {
 	}{status, state.Unresolved})
 }
 
-func (c *Coordinator) write(w http.ResponseWriter, r *http.Request, session string, status int, result any, err error) {
+func writeActionResult(w http.ResponseWriter, r *http.Request, result any, err error) {
 	if err != nil {
 		transport.WriteError(w, r, err)
 		return
 	}
-	if c.Signals != nil {
-		ctx, cancel := context.WithTimeout(r.Context(), 250*time.Millisecond)
-		defer cancel()
-		if err := c.Signals.Notify(ctx, SessionSignal{Scope: c.Scope, SessionID: session}); err != nil {
-			slog.Debug("journal wake missed", "error", err)
-		}
-	}
-	transport.WriteJSON(w, status, result)
+	transport.WriteJSON(w, http.StatusAccepted, result)
 }

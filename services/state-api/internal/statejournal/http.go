@@ -111,7 +111,17 @@ func newHTTP(store *Store, verifier *auth.Verifier, authorize transport.Authoriz
 		if err := authorize(r.Context(), caller.Claims, "state.coordinate"); err != nil {
 			return nil, err
 		}
-		return store.ListRecoverableVMSessions(r.Context(), caller.Scope, 64)
+		query := r.URL.Query()
+		var cursor *journal.VMReconcileCursor
+		after, id := query.Get("after"), query.Get("after_session")
+		if after != "" || id != "" {
+			at, err := time.Parse(time.RFC3339Nano, after)
+			if err != nil || id == "" {
+				return nil, invalidHTTP("invalid VM reconcile cursor")
+			}
+			cursor = &journal.VMReconcileCursor{At: at, SessionID: id}
+		}
+		return store.ListRecoverableVMPage(r.Context(), caller.Scope, query.Get("status"), cursor, 64)
 	}))
 	if dotsFIFO {
 		mux.HandleFunc("POST /v1/state/sessions/dots:enqueue", jsonRoute(func(r *http.Request, caller transport.Principal, req journal.DotsEnqueueRequest) (any, error) {

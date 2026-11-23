@@ -5,7 +5,7 @@ The coordinator accepts input for a deployment, watches the compact State API fo
 ## Service boundaries
 
 - State API owns admission, the ordered journal, checkpoints, lease generation and fenced requeue.
-- The coordinator retries start requests for queued work. For an expired VM lease it fences the physical execution ID stored as the lease owner, requeues that exact turn and epoch, and starts the next generation.
+- The coordinator starts newly admitted cold turns immediately and retries queued starts in the background. Queued starts and expired leases have separate paginated sweeps. For an expired VM lease it fences the physical execution ID stored as the lease owner, requeues that exact turn and epoch, and starts the next generation.
 - Runtime owns the VM, the external auth-injector and their lifecycle. It serves `POST /internal/v1/executions:ensure` and `POST /internal/v1/executions:fence` over mTLS. Repeated ensure for one execution ID must converge on one live VM, including when boot failed before claim. Fence returns success after the old execution has lost access.
 - The host claims a queued VM turn through `/v1/state/sessions/{session}/vm:claim`. The task identity must be its execution ID. The host passes the current turn sequence with each journal mutation and saves the steer acknowledgment in the same transaction as the recovered state incorporating that input.
 

@@ -42,8 +42,8 @@ func (db databaseState) GetEvents(ctx context.Context, s string, after int64, n 
 func (db databaseState) CancelSession(ctx context.Context, s string, t int64) (journal.TurnStatus, error) {
 	return db.store.CancelTurn(ctx, db.scope, s, t)
 }
-func (db databaseState) ListRecoverableVMSessions(ctx context.Context) ([]journal.VMSession, error) {
-	return db.store.ListRecoverableVMSessions(ctx, db.scope, 64)
+func (db databaseState) ListRecoverableVMPage(ctx context.Context, status string, cursor *journal.VMReconcileCursor) (journal.VMReconcilePage, error) {
+	return db.store.ListRecoverableVMPage(ctx, db.scope, status, cursor, 64)
 }
 func (db databaseState) RequeueFencedVMTurn(ctx context.Context, s string, r journal.FenceRequeueRequest) error {
 	return db.store.RequeueFencedVMTurn(ctx, db.scope, s, r)

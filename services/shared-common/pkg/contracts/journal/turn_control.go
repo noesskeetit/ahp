@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"time"
 
 	"github.com/ahp-platform/ahp/pkg/contracts"
 )
@@ -78,4 +79,15 @@ const SessionSignalChannel = "ahp_rc_sig"
 type SessionSignal struct {
 	Scope     contracts.Scope `json:"scope"`
 	SessionID string          `json:"session_id"`
+}
+
+// VMReconcileCursor is a position within one status queue in one State scope.
+type VMReconcileCursor struct {
+	At        time.Time `json:"at"`
+	SessionID string    `json:"session_id"`
+}
+
+type VMReconcilePage struct {
+	Sessions []VMSession        `json:"sessions"`
+	Next     *VMReconcileCursor `json:"next,omitempty"`
 }

@@ -3,6 +3,7 @@ import {EventEmitter} from 'node:events';
 import https from 'node:https';
 import test from 'node:test';
 import {CompactJournalClient, JournalHTTPError} from '../src/index.mjs';
+import {isTurnControl} from '../src/turn-control.mjs';
 
 test('the HTTPS transport accepts 204 and empty 200 responses', async t => {
   const responses = [204, 200];
@@ -76,4 +77,27 @@ test('heartbeat delivers turn control through the existing renewal loop', async 
   await heartbeat.done;
   assert.equal(observed, control);
   assert.equal(polls, 1);
+});
+
+test('native journal readers skip canonical turn control and SDK completion rows', () => {
+  const ingress = {codec: 'json', role: 'user', id: 'turn.input:' + 'a'.repeat(64)};
+  const output = {codec: 'json', type: 'turn.output', id: 'turn.output:4', role: 'assistant', turn_seq: 4};
+  const completed = {codec: 'json', type: 'turn.completed', id: 'turn.completed:4'};
+  for (const row of [
+    {...ingress, type: 'turn.input', turn_seq: 4},
+    {...ingress, type: 'turn.steer', turn_seq: 4},
+    {...ingress, type: 'turn.followup'},
+    {...completed, role: 'assistant'},
+    {...completed, role: 'system', turn_seq: 4},
+    {codec: 'json', type: 'ahp.state.mutation', id: 'state-mutation-' + 'a'.repeat(64), role: 'system', turn_seq: 4},
+    output,
+  ]) assert.equal(isTurnControl(row), true, row.type);
+  for (const row of [
+    {...output, turn_seq: 5},
+    {...output, turn_seq: undefined},
+    {...output, role: 'system'},
+    {...output, parent_id: 'native-parent'},
+    {...output, type: 'native'},
+    {...completed, role: 'system'},
+  ]) assert.equal(isTurnControl(row), false, row.type);
 });

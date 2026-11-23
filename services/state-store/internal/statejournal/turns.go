@@ -145,6 +145,7 @@ func (s *Store) enqueueTurn(ctx context.Context, scope contracts.Scope, req Enqu
 	case err == nil && bytes.Equal(stored, digest[:]):
 		if admissionReceipt != nil {
 			receipt.EnqueueReceipt = *admissionReceipt
+			receipt.Replayed = true
 		}
 		return receipt, nil
 	case err == nil:
