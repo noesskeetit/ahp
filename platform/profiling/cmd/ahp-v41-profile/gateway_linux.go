@@ -230,45 +230,13 @@ func runGateway(ctx context.Context) error {
 	}
 
 	var held sync.Map
-	faults := get("FAULTS") == "true"
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !faults || r.Method != http.MethodPost || r.URL.Path != "/v1/tools/Call" {
-			routes.ServeHTTP(w, r)
-			return
-		}
-		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
-		if err != nil {
-			http.Error(w, "cannot read tool request", http.StatusBadRequest)
-			return
-		}
-		r.Body = io.NopCloser(bytes.NewReader(raw))
-		var call struct {
-			Arguments effectArgs `json:"arguments"`
-		}
-		if json.Unmarshal(raw, &call) != nil || !call.Arguments.HoldReply {
-			routes.ServeHTTP(w, r)
-			return
-		}
-		recorded := httptest.NewRecorder()
-		routes.ServeHTTP(recorded, r)
-		var reply struct {
-			Status string `json:"status"`
-		}
-		if recorded.Code == http.StatusOK && json.Unmarshal(recorded.Body.Bytes(), &reply) == nil && reply.Status == "SUCCEEDED" {
-			if _, alreadyHeld := held.LoadOrStore(call.Arguments.EffectID, struct{}{}); !alreadyHeld {
-				// This is only the guest-facing acknowledgement. The real owner has already committed the receipt.
-				<-r.Context().Done()
-				return
-			}
-		}
-		for name, values := range recorded.Header() {
-			w.Header()[name] = values
-		}
-		w.WriteHeader(recorded.Code)
-		_, _ = w.Write(recorded.Body.Bytes())
-	}))
+	if get("FAULTS") == "true" {
+		mux.Handle("/", holdFaultReplies(routes, &held, 10*time.Second))
+	} else {
+		mux.Handle("/", routes)
+	}
 	tlsConfig, err := endpointTLS(get("CA"), get("CERT"), get("KEY"))
 	if err != nil {
 		return err
@@ -278,7 +246,7 @@ func runGateway(ctx context.Context) error {
 	monitor := http.NewServeMux()
 	installPprofRoutes(monitor)
 	monitor.HandleFunc("GET /debug/ahp-profile/held", func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := held.Load(r.URL.Query().Get("effect_id")); !ok {
+		if !faultReplyHeld(&held, r.URL.Query().Get("effect_id")) {
 			http.NotFound(w, r)
 			return
 		}
@@ -328,4 +296,65 @@ func readPoolStats(pool *pgxpool.Pool) map[string]any {
 	return map[string]any{"acquire_count": s.AcquireCount(), "acquire_duration_ns": s.AcquireDuration().Nanoseconds(),
 		"empty_acquire_count": s.EmptyAcquireCount(), "empty_acquire_wait_ns": s.EmptyAcquireWaitTime().Nanoseconds(),
 		"total_conns": s.TotalConns(), "acquired_conns": s.AcquiredConns(), "idle_conns": s.IdleConns(), "max_conns": s.MaxConns()}
+}
+
+func holdFaultReplies(routes http.Handler, held *sync.Map, holdFor time.Duration) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/tools/Call" {
+			routes.ServeHTTP(w, r)
+			return
+		}
+		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "cannot read tool request", http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		var call struct {
+			Arguments effectArgs `json:"arguments"`
+		}
+		if json.Unmarshal(raw, &call) != nil || !call.Arguments.HoldReply {
+			routes.ServeHTTP(w, r)
+			return
+		}
+		recorded := httptest.NewRecorder()
+		routes.ServeHTTP(recorded, r)
+		var reply struct {
+			Status string `json:"status"`
+		}
+		if recorded.Code == http.StatusOK && json.Unmarshal(recorded.Body.Bytes(), &reply) == nil && reply.Status == "SUCCEEDED" {
+			released := make(chan struct{})
+			if _, alreadyHeld := held.LoadOrStore(call.Arguments.EffectID, released); !alreadyHeld {
+				// The Gateway already committed the receipt. Let the same
+				// acknowledgement through if the fixture never freezes the guest.
+				timer := time.NewTimer(holdFor)
+				defer timer.Stop()
+				select {
+				case <-r.Context().Done():
+					close(released)
+					return
+				case <-timer.C:
+					close(released)
+				}
+			}
+		}
+		for name, values := range recorded.Header() {
+			w.Header()[name] = values
+		}
+		w.WriteHeader(recorded.Code)
+		_, _ = w.Write(recorded.Body.Bytes())
+	})
+}
+
+func faultReplyHeld(held *sync.Map, id string) bool {
+	released, ok := held.Load(id)
+	if !ok {
+		return false
+	}
+	select {
+	case <-released.(chan struct{}):
+		return false
+	default:
+		return true
+	}
 }

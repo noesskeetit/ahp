@@ -16,6 +16,7 @@ import (
 )
 
 var productRevision = "557090861c48f8b18f1881d907d85f52d8a023a0"
+var profilingRevision = "unversioned"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -55,6 +56,7 @@ type sessionConfig struct {
 	seed         int
 	maxLanes     int
 	fcLanes      int
+	claimTTL     time.Duration
 	enforce      bool
 	injectFaults bool
 }
@@ -62,19 +64,35 @@ type sessionConfig struct {
 func runProfile(ctx context.Context, args []string) (err error) {
 	flagset := flag.NewFlagSet("run", flag.ContinueOnError)
 	cfg := sessionConfig{}
-	flagset.StringVar(&cfg.phase, "phase", "smoke", "smoke, p0, p1, p2, p3, p4, fc1, fc2, all-process or all-fc")
+	flagset.StringVar(&cfg.phase, "phase", "smoke", "smoke, p0, p1, p2, p3, p4, p5, fc1, fc2, fcmax, all-process or all-fc")
 	flagset.StringVar(&cfg.out, "out", envDefault("AHP_PROFILE_OUT", "./evidence"), "private evidence directory")
 	var mcpTransport string
 	flagset.StringVar(&mcpTransport, "mcp-transport", envDefault(profileMCPTransportEnv, "per-call"), "per-call baseline or pooled A/B candidate")
 	flagset.DurationVar(&cfg.quick, "quick", 0, "shortened diagnostic step duration; zero runs the protocol")
 	flagset.Float64Var(&cfg.rate, "rate", 0, "healthy P2 throughput used to schedule a standalone P4")
 	flagset.IntVar(&cfg.seed, "seed", 10000, "sleeping State sessions; 25 events and one checkpoint each")
-	flagset.IntVar(&cfg.maxLanes, "max-lanes", 192, "upper bound on concurrency ladder")
-	flagset.IntVar(&cfg.fcLanes, "fc-lanes", 0, "run only this FC2 density step (1, 4, 8, or 16)")
+	flagset.IntVar(&cfg.maxLanes, "max-lanes", 192, "upper bound on concurrency ladder (512 by default for P5)")
+	flagset.IntVar(&cfg.fcLanes, "fc-lanes", 0, "single FC2 density step (1, 4, 8, or 16) or required FC-MAX step (24 or 32)")
+	flagset.DurationVar(&cfg.claimTTL, "worker-claim-ttl", workerClaimTTL, "P5 worker claim and heartbeat TTL (3s or 15s); FC-MAX uses 15s")
 	flagset.BoolVar(&cfg.injectFaults, "inject-faults", true, "inject worker failures during full P4 or FC2")
 	flagset.BoolVar(&cfg.enforce, "enforce-budget", true, "require a kernel-enforced 4 vCPU / 4 GiB SUT")
 	if err := flagset.Parse(args); err != nil {
 		return err
+	}
+	var maxLanesSet, claimTTLSet bool
+	flagset.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "max-lanes":
+			maxLanesSet = true
+		case "worker-claim-ttl":
+			claimTTLSet = true
+		}
+	})
+	if cfg.phase == "p5" && !maxLanesSet {
+		cfg.maxLanes = 512
+	}
+	if cfg.phase == "fcmax" && !claimTTLSet {
+		cfg.claimTTL = 15 * time.Second
 	}
 	if mcpTransport != "per-call" && mcpTransport != "pooled" {
 		return errors.New("invalid MCP transport mode")
@@ -82,20 +100,30 @@ func runProfile(ctx context.Context, args []string) (err error) {
 	if err := os.Setenv(profileMCPTransportEnv, mcpTransport); err != nil {
 		return err
 	}
-	if cfg.quick < 0 || cfg.seed < 0 || cfg.seed > 10000 || cfg.maxLanes < 1 || cfg.maxLanes > 192 || cfg.rate < 0 {
+	if cfg.quick < 0 || cfg.seed < 0 || cfg.seed > 10000 || cfg.maxLanes < 1 || cfg.maxLanes > 1024 || cfg.rate < 0 {
 		return errors.New("invalid profiling argument")
 	}
 	switch cfg.phase {
-	case "smoke", "p0", "p1", "p2", "p3", "p4", "fc1", "fc2", "all-process", "all-fc":
+	case "smoke", "p0", "p1", "p2", "p3", "p4", "p5", "fc1", "fc2", "fcmax", "all-process", "all-fc":
 	default:
 		return fmt.Errorf("unknown profile phase %q", cfg.phase)
 	}
 	if cfg.phase == "p4" && cfg.rate == 0 {
 		return errors.New("standalone P4 requires the completed/s rate from a healthy P2 step")
 	}
-	if cfg.fcLanes != 0 && (cfg.phase != "fc2" || cfg.fcLanes > cfg.maxLanes ||
+	if cfg.phase == "p5" && (cfg.maxLanes < 8 || (cfg.claimTTL != 3*time.Second && cfg.claimTTL != 15*time.Second)) {
+		return errors.New("P5 requires --max-lanes of at least 8 and worker claim TTL of 3s or 15s")
+	}
+	if cfg.phase == "fcmax" {
+		if cfg.claimTTL != 15*time.Second || cfg.fcLanes > cfg.maxLanes || (cfg.fcLanes != 24 && cfg.fcLanes != 32) {
+			return errors.New("FC-MAX requires --fc-lanes of 24 or 32 within --max-lanes and worker claim TTL of 15s")
+		}
+	} else if cfg.fcLanes != 0 && (cfg.phase != "fc2" || cfg.fcLanes > cfg.maxLanes ||
 		(cfg.fcLanes != 1 && cfg.fcLanes != 4 && cfg.fcLanes != 8 && cfg.fcLanes != 16)) {
 		return errors.New("--fc-lanes requires an FC2 density step within --max-lanes")
+	}
+	if claimTTLSet && cfg.phase != "p5" && cfg.phase != "fcmax" {
+		return errors.New("--worker-claim-ttl requires P5 or FC-MAX")
 	}
 	faults := cfg.injectFaults && cfg.quick == 0 &&
 		(cfg.phase == "p4" || cfg.phase == "all-process" || cfg.phase == "fc2" || cfg.phase == "all-fc")
@@ -129,7 +157,7 @@ func runProfile(ctx context.Context, args []string) (err error) {
 		}
 	}
 	manifest := map[string]any{
-		"product_sha": productRevision, "phase": cfg.phase, "go_version": runtime.Version(),
+		"product_sha": productRevision, "profiling_sha": profilingRevision, "phase": cfg.phase, "go_version": runtime.Version(),
 		"goarch": runtime.GOARCH, "goos": runtime.GOOS, "visible_cpus": runtime.NumCPU(),
 		"started_at": time.Now().UTC(), "step_override": cfg.quick.String(), "dormant_sessions": cfg.seed, "max_lanes": cfg.maxLanes,
 		"fc_lanes": cfg.fcLanes, "inject_faults": faults, "mcp_transport": mcpTransport,
@@ -138,6 +166,7 @@ func runProfile(ctx context.Context, args []string) (err error) {
 		"storage":                              os.Getenv("AHP_PROFILE_STORAGE"),
 		"process_worker_soft_heap_limit_bytes": processWorkerMemoryLimit,
 		"process_worker_gomaxprocs":            processWorkerMaxProcs,
+		"worker_claim_ttl_ms":                  cfg.claimTTL.Milliseconds(),
 	}
 	if cfg.enforce {
 		if e := checkSUT(sc.SUTCgroup); e != nil {
@@ -183,6 +212,8 @@ func runProfile(ctx context.Context, args []string) (err error) {
 		return nil
 	case "fc1", "fc2", "all-fc":
 		return runFirecracker(ctx, s, cfg)
+	case "p5", "fcmax":
+		return runLongProfiles(ctx, s, cfg)
 	default:
 		return runProcessProfiles(ctx, s, cfg, sc.SUTCgroup)
 	}

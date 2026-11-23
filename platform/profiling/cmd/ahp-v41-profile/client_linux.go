@@ -34,6 +34,8 @@ type requestResult struct {
 	SentAt           int64       `json:"sent_ns"`
 	AcceptedAt       int64       `json:"accepted_ns,omitempty"`
 	FirstAt          int64       `json:"first_event_ns,omitempty"`
+	SSEOpenedAt      int64       `json:"sse_opened_ns,omitempty"`
+	SSEClosedAt      int64       `json:"sse_closed_ns,omitempty"`
 	ClaimedAt        int64       `json:"worker_start_ns,omitempty"`
 	CompletedAt      int64       `json:"terminal_sse_ns,omitempty"`
 	VerifiedAt       int64       `json:"durable_verified_ns,omitempty"`
@@ -136,7 +138,11 @@ func (s *stand) postTurn(ctx context.Context, index int, conversation, delivery 
 }
 
 func (s *stand) readTurn(ctx context.Context, call inflight, firecracker bool) requestResult {
-	r := call.result
+	return s.readTurnWithHandoff(ctx, call, firecracker, nil)
+}
+
+func (s *stand) readTurnWithHandoff(ctx context.Context, call inflight, firecracker bool, onDelta func()) (r requestResult) {
+	r = call.result
 	if r.Failure != "" {
 		return r
 	}
@@ -151,11 +157,17 @@ func (s *stand) readTurn(ctx context.Context, call inflight, firecracker bool) r
 		r.Failure = "stream_transport"
 		return r
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+		if r.SSEOpenedAt > 0 {
+			r.SSEClosedAt = monotonicNS()
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		r.Failure = "stream_http_" + strconv.Itoa(resp.StatusCode)
 		return r
 	}
+	r.SSEOpenedAt = monotonicNS()
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 8192), 2<<20)
@@ -193,6 +205,11 @@ func (s *stand) readTurn(ctx context.Context, call inflight, firecracker bool) r
 						r.ClaimedAt = started.Mono
 					}
 					r.WarmHandoffNS, r.PriorFinishNS = started.WarmHandoffNS, started.PreviousFinishRTTNS
+				case "bench.delta":
+					if onDelta != nil {
+						onDelta()
+						onDelta = nil
+					}
 				case "turn.output":
 					var out turnOutput
 					if json.Unmarshal(event.Payload.Inline, &out) != nil || out.ID != r.ID {

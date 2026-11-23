@@ -77,11 +77,12 @@ type stand struct {
 	SubjectTokens, Tenants                []string
 	PIDs                                  map[string]int
 	DebugURLs                             map[string]string
-	PG, RuntimePG                         *pgxpool.Pool
+	PG, RuntimePG, ToolsPG                *pgxpool.Pool
 	DatabaseNames                         map[string]string
 	Effects                               *effectRecorder
 	SlotDir, FirecrackerCgroup, FCDataDir string
 
+	soakCleanup            *soakCleanupEvidence
 	cfg                    standConfig
 	tempDir                string
 	runtimeDir             string
@@ -401,7 +402,7 @@ func (s *stand) prepareDatabases(ctx context.Context) (map[string]string, error)
 		s.createdDatabases = append(s.createdDatabases, name)
 		dsns[label] = s.cfg.PostgresDSN + " dbname=" + name
 	}
-	for label, target := range map[string]**pgxpool.Pool{"state": &s.PG, "runtime": &s.RuntimePG, "identity": &s.identityPG} {
+	for label, target := range map[string]**pgxpool.Pool{"state": &s.PG, "runtime": &s.RuntimePG, "identity": &s.identityPG, "tools": &s.ToolsPG} {
 		*target, err = pgxpool.New(ctx, profilePoolDSN(dsns[label], 8, 0))
 		if err != nil {
 			return nil, fmt.Errorf("connect fixture %s DB: %w", label, err)
@@ -648,11 +649,6 @@ func (s *stand) waitReady(ctx context.Context, p *ownerProcess, endpoint, debug 
 	}
 }
 
-func (s *stand) Fence(ctx context.Context, scope contracts.Scope, session string, launchTurnSeq, generation int64) error {
-	return s.dispatch.Fence(ctx, runcoord.Execution{Scope: scope, SessionID: session, LaunchTurnSeq: launchTurnSeq, Generation: generation,
-		ExecutionID: journal.DeterministicExecutionID(scope, session, launchTurnSeq, generation)})
-}
-
 func (s *stand) Freeze(ctx context.Context, scope contracts.Scope, session string, launchTurnSeq, generation int64) (int, error) {
 	id := journal.DeterministicExecutionID(scope, session, launchTurnSeq, generation)
 	var attempt int64
@@ -686,7 +682,10 @@ func (s *stand) Freeze(ctx context.Context, scope contracts.Scope, session strin
 			match = len(strings.Fields(string(pids))) == 1
 		}
 		if match {
-			err = unix.PidfdSendSignal(fd, unix.SIGSTOP, nil, 0)
+			err = ctx.Err()
+			if err == nil {
+				err = unix.PidfdSendSignal(fd, unix.SIGSTOP, nil, 0)
+			}
 		}
 		unix.Close(fd)
 		if match {
@@ -719,56 +718,84 @@ func (s *stand) BootstrapNS(ctx context.Context, executionID string) (int64, err
 
 // The caller gathers cleanup evidence first. This is fallback shutdown through
 // the real runtime owner if a failed scenario left a guest running.
-func (s *stand) closeRunningGuests() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	rows, err := s.RuntimePG.Query(ctx, `SELECT tenant_id,deployment_id,subject_id,session_id,
+type runtimeFenceBatch struct {
+	Found       int `json:"unfenced_found"`
+	Succeeded   int `json:"fence_succeeded"`
+	Failed      int `json:"fence_failed"`
+	Unattempted int `json:"fence_unattempted"`
+}
+
+const runtimeFenceTimeout = 10 * time.Second
+
+func (s *stand) closeRunningGuests(ctx context.Context) (runtimeFenceBatch, error) {
+	var result runtimeFenceBatch
+	listCtx, stopList := context.WithTimeout(ctx, runtimeFenceTimeout)
+	defer stopList()
+	rows, err := s.RuntimePG.Query(listCtx, `SELECT tenant_id,deployment_id,subject_id,session_id,
       execution_id,generation,COALESCE(launch_turn_seq,0) FROM ahp_runtime.executions
       WHERE status != 'FENCED'`)
 	if err != nil {
 		// Runtime startup can fail before the schema exists.
 		var exists bool
-		if lookup := s.RuntimePG.QueryRow(ctx, "SELECT to_regclass('ahp_runtime.executions') IS NOT NULL").Scan(&exists); lookup == nil && !exists {
-			return nil
+		if lookup := s.RuntimePG.QueryRow(listCtx, "SELECT to_regclass('ahp_runtime.executions') IS NOT NULL").Scan(&exists); lookup == nil && !exists {
+			return result, nil
 		}
-		return err
+		return result, err
 	}
+	defer rows.Close()
 	var exits []runcoord.Execution
 	for rows.Next() {
 		var e runcoord.Execution
 		if err := rows.Scan(&e.Scope.Tenant, &e.Scope.Deployment, &e.Scope.Subject,
 			&e.SessionID, &e.ExecutionID, &e.Generation, &e.LaunchTurnSeq); err != nil {
-			rows.Close()
-			return err
+			return result, err
 		}
 		exits = append(exits, e)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return result, err
 	}
+	stopList()
+	result.Found = len(exits)
+	const parallelFences = 16
+	waves := (result.Found + parallelFences - 1) / parallelFences
+	batchCtx, stopBatch := context.WithTimeout(ctx, min(5*time.Minute, time.Duration(waves+1)*runtimeFenceTimeout))
+	defer stopBatch()
 	var g sync.WaitGroup
 	var mu sync.Mutex
-	var errs []error
-	gate := make(chan struct{}, 16)
+	var firstFailure error
+	gate := make(chan struct{}, parallelFences)
+schedule:
 	for _, e := range exits {
 		select {
 		case gate <- struct{}{}:
-		case <-ctx.Done():
-			g.Wait()
-			return errors.Join(append(errs, ctx.Err())...)
+		case <-batchCtx.Done():
+			break schedule
 		}
 		g.Go(func() {
 			defer func() { <-gate }()
-			if err := s.dispatch.Fence(ctx, e); err != nil {
-				mu.Lock()
-				errs = append(errs, err)
-				mu.Unlock()
+			attemptCtx, cancel := context.WithTimeout(batchCtx, runtimeFenceTimeout)
+			defer cancel()
+			err := s.dispatch.Fence(attemptCtx, e)
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				result.Succeeded++
+			} else {
+				result.Failed++
+				if firstFailure == nil {
+					firstFailure = err
+				}
 			}
 		})
 	}
 	g.Wait()
-	return errors.Join(errs...)
+	result.Unattempted = result.Found - result.Succeeded - result.Failed
+	if result.Failed+result.Unattempted > 0 {
+		return result, fmt.Errorf("runtime fence batch failed (%d failed, %d unattempted): %w",
+			result.Failed, result.Unattempted, errors.Join(firstFailure, batchCtx.Err()))
+	}
+	return result, nil
 }
 
 func (s *stand) Close() error {
@@ -786,7 +813,8 @@ func (s *stand) Close() error {
 	for i := len(s.roles) - 1; i >= 0; i-- {
 		p := s.roles[i]
 		if p.name == "ahp-vm-runtime" {
-			errs = append(errs, s.closeRunningGuests())
+			_, err := s.closeRunningGuests(context.Background())
+			errs = append(errs, err)
 		}
 		_ = p.cmd.Process.Signal(syscall.SIGTERM)
 		select {
@@ -800,7 +828,7 @@ func (s *stand) Close() error {
 	if s.mcp != nil {
 		errs = append(errs, s.mcp.Close())
 	}
-	for _, pool := range []*pgxpool.Pool{s.PG, s.RuntimePG, s.identityPG} {
+	for _, pool := range []*pgxpool.Pool{s.PG, s.RuntimePG, s.identityPG, s.ToolsPG} {
 		if pool != nil {
 			pool.Close()
 		}

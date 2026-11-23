@@ -13,26 +13,33 @@ import (
 )
 
 func (s *stand) observeFaultOrNormal(ctx context.Context, call inflight, firecracker bool) requestResult {
-	if call.result.Failure != "" || !call.result.Fault {
-		return s.readTurn(ctx, call, firecracker)
-	}
-	observeCtx, stop := context.WithCancel(ctx)
-	defer stop()
-	frozen := make(chan error, 1)
-	go func() { frozen <- s.freezeAfterReceipt(observeCtx, call.result) }()
-	r := s.readTurn(observeCtx, call, firecracker)
-	stop()
-	if err := <-frozen; err != nil {
-		r.Failure = "fault_freeze_failed"
-	} else if r.Executed == nil || r.Executed.Epoch < 2 {
-		r.Failure = "fault_replacement_missing"
-	}
+	r, _ := s.observeFaultOutcome(ctx, call, firecracker)
 	return r
 }
 
-func (s *stand) freezeAfterReceipt(ctx context.Context, r requestResult) error {
-	if err := s.Effects.held(ctx, r.ID+"/0"); err != nil {
-		return err
+func (s *stand) observeFaultOutcome(ctx context.Context, call inflight, firecracker bool) (requestResult, bool) {
+	if call.result.Failure != "" || !call.result.Fault {
+		return s.readTurn(ctx, call, firecracker), false
+	}
+	observeCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	frozen := make(chan int64, 1)
+	go func() { frozen <- s.freezeAfterReceipt(observeCtx, call.result) }()
+	r := s.readTurn(observeCtx, call, firecracker)
+	stop()
+	epoch := <-frozen
+	if epoch == 0 {
+		r.Failure = "fault_freeze_failed"
+	} else if r.Executed == nil || r.Executed.Epoch <= epoch {
+		r.Failure = "fault_replacement_missing"
+	}
+	return r, epoch != 0
+}
+
+func (s *stand) freezeAfterReceipt(ctx context.Context, r requestResult) int64 {
+	key := r.ID + "/0"
+	if err := s.Effects.held(ctx, key); err != nil {
+		return 0
 	}
 	for i := range s.SubjectTokens {
 		scope := s.Scope(i)
@@ -40,17 +47,81 @@ func (s *stand) freezeAfterReceipt(ctx context.Context, r requestResult) error {
 			continue
 		}
 		session := journal.ScopedSessionID(scope, r.Conversation)
+		var owner string
 		var launch, gen int64
-		if err := s.RuntimePG.QueryRow(ctx, `
-          SELECT launch_turn_seq,generation FROM ahp_runtime.executions
-          WHERE tenant_id=$1 AND deployment_id=$2 AND session_id=$3 AND status='RUNNING'
-          ORDER BY generation DESC LIMIT 1`, scope.Tenant, scope.Deployment, session).Scan(&launch, &gen); err != nil {
-			return err
+		// The active turn and its physical owner come from State. A warm
+		// owner's launch sequence can predate this turn.
+		if err := s.PG.QueryRow(ctx, `
+			SELECT lease_owner,lease_epoch FROM ahp_journal.sessions
+			WHERE tenant_id=$1 AND deployment_id=$2 AND subject_id=$3 AND session_id=$4
+			  AND status='ACTIVE' AND turn_input_seq=$5 AND lease_expires_at>statement_timestamp()`,
+			scope.Tenant, scope.Deployment, scope.Subject, session, r.Seq).Scan(&owner, &gen); err != nil {
+			return 0
 		}
-		_, err := s.Freeze(ctx, scope, session, launch, gen)
-		return err
+		if err := s.RuntimePG.QueryRow(ctx, `
+			SELECT launch_turn_seq FROM ahp_runtime.executions
+			WHERE tenant_id=$1 AND deployment_id=$2 AND subject_id=$3 AND session_id=$4 AND execution_id=$5 AND generation=$6`,
+			scope.Tenant, scope.Deployment, scope.Subject, session, owner, gen).Scan(&launch); err != nil {
+			return 0
+		}
+		if journal.DeterministicExecutionID(scope, session, launch, gen) != owner {
+			return 0
+		}
+		// The held acknowledgement can expire during the lookups.
+		heldCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		err := s.Effects.held(heldCtx, key)
+		cancel()
+		if err != nil {
+			return 0
+		}
+		if _, err := s.Freeze(ctx, scope, session, launch, gen); err == nil {
+			return gen
+		}
+		return 0
 	}
-	return errors.New("fixture scope missing")
+	return 0
+}
+
+const soakFaultCutoff = 90 * time.Second
+
+func soakFaultScheduled(enabled bool, ordinal int, arrival, loadEnd time.Time) bool {
+	return enabled && ordinal%50 == 0 && arrival.Before(loadEnd.Add(-soakFaultCutoff))
+}
+
+type soakFaultAttempt struct {
+	ID        string `json:"id"`
+	Armed     bool   `json:"hold_reply_sent"`
+	Accepted  bool   `json:"accepted"`
+	Injected  bool   `json:"sigstop_confirmed"`
+	Recovered bool   `json:"recovery_verified"`
+}
+
+type soakFaultTotals struct {
+	Intended  int `json:"intended"`
+	Armed     int `json:"armed"`
+	Accepted  int `json:"accepted"`
+	Injected  int `json:"injected"`
+	Recovered int `json:"recovered"`
+}
+
+func (t *soakFaultTotals) add(a soakFaultAttempt) {
+	t.Intended++
+	if a.Armed {
+		t.Armed++
+		if a.Accepted {
+			t.Accepted++
+		}
+	}
+	if a.Injected {
+		t.Injected++
+	}
+	if a.Recovered {
+		t.Recovered++
+	}
+}
+
+func (t soakFaultTotals) qualified() bool {
+	return t.Injected > 0 && t.Accepted == t.Injected && t.Injected == t.Recovered
 }
 
 type loadPeriod struct {
@@ -90,6 +161,8 @@ func runSoak(ctx context.Context, s *stand, cfg sessionConfig, rate float64, lan
 	endSampler := sampleResources(ctx, s, c, cgroup)
 	defer endSampler()
 	var pending sync.WaitGroup
+	var faultMu sync.Mutex
+	faults := make(map[string]soakFaultAttempt)
 	// The pacing loop stays independent of service backpressure. Capacity
 	// misses are recorded against the planned arrival, not silently skipped.
 	pendingLimit := make(chan struct{}, max(128, 4*lanes))
@@ -102,8 +175,15 @@ func runSoak(ctx context.Context, s *stand, cfg sessionConfig, rate float64, lan
 		first := time.Now()
 		period.StartNS = monotonicNS()
 		total := int(math.Floor(period.Seconds * period.Rate))
+		end := first
+		for _, remaining := range periods[i:] {
+			end = end.Add(time.Duration(remaining.Seconds * float64(time.Second)))
+		}
+		faultCutoff := end.Add(-soakFaultCutoff)
 		for j := 0; j < total; j++ {
-			wait := time.Until(first.Add(time.Duration(float64(j) / period.Rate * float64(time.Second))))
+			offset := time.Duration(float64(j) / period.Rate * float64(time.Second))
+			arrival := first.Add(offset)
+			wait := time.Until(arrival)
 			if wait > 0 {
 				timer := time.NewTimer(wait)
 				select {
@@ -116,7 +196,7 @@ func runSoak(ctx context.Context, s *stand, cfg sessionConfig, rate float64, lan
 				break
 			}
 			ordinal++
-			scheduled := period.StartNS + int64(float64(j)/period.Rate*float64(time.Second))
+			scheduled := period.StartNS + int64(offset)
 			cold := ordinal%20 < 3
 			lane := int((uint64(ordinal)*2654435761)>>20) % lanes
 			target := lane % len(s.SubjectTokens)
@@ -127,7 +207,7 @@ func runSoak(ctx context.Context, s *stand, cfg sessionConfig, rate float64, lan
 			}
 			input := realistic.input(id, ordinal)
 			input.HoldForFollowup = false
-			input.Fault = cfg.injectFaults && ordinal%50 == 0 && cfg.quick == 0
+			intendedFault := soakFaultScheduled(cfg.injectFaults && cfg.quick == 0, ordinal, arrival, end)
 			select {
 			case pendingLimit <- struct{}{}:
 				pending.Go(func() {
@@ -135,6 +215,7 @@ func runSoak(ctx context.Context, s *stand, cfg sessionConfig, rate float64, lan
 					if !cold {
 						perLane[lane].Lock()
 					}
+					input.Fault = intendedFault && time.Now().Before(faultCutoff)
 					call := s.submit(workCtx, target, conv, input, scheduled, "auto", 15*time.Second)
 					if !cold {
 						perLane[lane].Unlock()
@@ -143,21 +224,37 @@ func runSoak(ctx context.Context, s *stand, cfg sessionConfig, rate float64, lan
 					if input.Fault {
 						timeout = 95 * time.Second
 					}
+					var injected bool
 					result := withTurnTimeout(workCtx, timeout, func(turnCtx context.Context) requestResult {
-						return s.observeFaultOrNormal(turnCtx, call, false)
+						r, applied := s.observeFaultOutcome(turnCtx, call, false)
+						injected = applied
+						return r
 					})
+					result.Fault = intendedFault
 					if result.Executed != nil {
 						reused := result.Seq != result.Executed.LaunchTurnSeq
 						result.Reused = &reused
 					}
 					if cold {
-						s.stopExecution(workCtx, target, &result)
+						s.stopColdSoakExecution(ctx, target, &result)
+					}
+					if intendedFault {
+						faultMu.Lock()
+						faults[id] = soakFaultAttempt{ID: id, Armed: input.Fault && result.SentAt > 0,
+							Accepted: result.AcceptedAt > 0, Injected: injected,
+							Recovered: injected && result.Failure == "" && result.VerifiedAt > 0}
+						faultMu.Unlock()
 					}
 					c.add(result)
 				})
 			default:
+				if intendedFault {
+					faultMu.Lock()
+					faults[id] = soakFaultAttempt{ID: id}
+					faultMu.Unlock()
+				}
 				c.add(requestResult{ID: id, Conversation: conv, Tenant: s.Scope(target).Tenant, RequestedAt: scheduled,
-					Fault: input.Fault, Tools: input.Tools, Failure: "generator_outstanding_limit"})
+					Fault: intendedFault, Tools: input.Tools, Failure: "generator_outstanding_limit"})
 			}
 		}
 		// The configured open-loop interval includes its final fractional
@@ -190,35 +287,42 @@ func runSoak(ctx context.Context, s *stand, cfg sessionConfig, rate float64, lan
 		stop()
 		<-drained
 	}
-	// Fence the last physical owner of each warm lane. Old completed
-	// executions have already stopped their attempt on worker exit.
-	c.mu.Lock()
-	last := map[string]requestResult{}
-	for _, r := range c.rows {
-		if r.Executed == nil || r.Conversation == r.ID {
-			continue
-		}
-		if previous := last[r.Conversation]; r.Executed.Epoch >= previousEpoch(previous) {
-			last[r.Conversation] = r
-		}
+	// Client observation and State draining are distinct. Let the live
+	// coordinator complete queued jobs and reconcile leases before fencing.
+	drainStarted := monotonicNS()
+	beforeFence, drainErr := s.waitSoakStateDrain(ctx, drain)
+	if drainErr != nil {
+		c.note("State drain failed")
 	}
-	c.mu.Unlock()
-	for _, r := range last {
-		for i := range s.SubjectTokens {
-			if s.Scope(i).Tenant == r.Tenant {
-				s.stopExecution(ctx, i, &r)
-				break
-			}
-		}
-		if r.FenceTimeError != "" {
-			c.note("warm final fence failed")
-		}
+	s.soakCleanup = s.collectSoakCleanup(ctx, beforeFence, drainErr)
+	if err := writeJSONFile(filepath.Join(c.dir, "drain.json"), map[string]any{
+		"state_drain_started_ns": drainStarted, "finished_ns": monotonicNS(), "cleanup": s.soakCleanup,
+	}); err != nil {
+		return err
 	}
 	endSampler()
 	if err := writeJSONFile(filepath.Join(c.dir, "schedule.json"), periods); err != nil {
 		return err
 	}
 	summaries := map[string]any{}
+	var faultTotals soakFaultTotals
+	faultRows := make([]soakFaultAttempt, 0, len(faults))
+	normalRows := make([]requestResult, 0, len(c.rows))
+	fenceFailures := 0
+	for _, r := range c.rows {
+		if r.FenceTimeError != "" {
+			fenceFailures++
+		}
+		if fault, ok := faults[r.ID]; ok {
+			faultTotals.add(fault)
+			faultRows = append(faultRows, fault)
+			if fault.Armed && fault.Accepted {
+				continue
+			}
+		}
+		r.Fault = false
+		normalRows = append(normalRows, r)
+	}
 	var steady []sample
 	if periods[0].EndNS != 0 {
 		from := periods[0].StartNS
@@ -233,6 +337,7 @@ func runSoak(ctx context.Context, s *stand, cfg sessionConfig, rate float64, lan
 			continue
 		}
 		var scheduled, sent, accepted, done, errorsN, ordinary int
+		var intervalFaults soakFaultTotals
 		for _, r := range c.rows {
 			if r.RequestedAt >= period.StartNS && r.RequestedAt < period.EndNS {
 				scheduled++
@@ -242,7 +347,11 @@ func runSoak(ctx context.Context, s *stand, cfg sessionConfig, rate float64, lan
 				if r.AcceptedAt > 0 {
 					accepted++
 				}
-				if !r.Fault {
+				fault := faults[r.ID]
+				if r.Fault {
+					intervalFaults.add(fault)
+				}
+				if !fault.Armed || !fault.Accepted {
 					ordinary++
 					if r.Failure != "" {
 						errorsN++
@@ -254,9 +363,14 @@ func runSoak(ctx context.Context, s *stand, cfg sessionConfig, rate float64, lan
 			}
 		}
 		summaries[period.Name] = map[string]any{"scheduled": scheduled, "sent": sent, "accepted": accepted,
-			"completed_during_interval": done, "normal_attempts": ordinary, "normal_errors": errorsN}
+			"completed_during_interval": done, "normal_attempts": ordinary, "normal_errors": errorsN, "faults": intervalFaults}
 	}
 	if err := writeJSONFile(filepath.Join(c.dir, "intervals.json"), summaries); err != nil {
+		return err
+	}
+	if err := writeJSONFile(filepath.Join(c.dir, "faults.json"), map[string]any{
+		"totals": faultTotals, "attempts": faultRows, "cutoff_seconds_before_load_end": soakFaultCutoff.Seconds(),
+	}); err != nil {
 		return err
 	}
 	steadyResources := summarizeSamples(steady)
@@ -271,16 +385,21 @@ func runSoak(ctx context.Context, s *stand, cfg sessionConfig, rate float64, lan
 	if cfg.quick > 0 {
 		qualification = append(qualification, "shortened diagnostic intervals")
 	}
-	if summary.NormalAttempts == 0 || float64(summary.NormalErrors)/float64(summary.NormalAttempts) > .001 ||
-		summary.WorstNormalErrorRate > .001 {
+	normalErrors := 0
+	for _, r := range normalRows {
+		if r.Failure != "" {
+			normalErrors++
+		}
+	}
+	worstNormalErrorRate := windowErrors(normalRows)
+	if len(normalRows) == 0 || float64(normalErrors)/float64(len(normalRows)) > .001 || worstNormalErrorRate > .001 {
 		qualification = append(qualification, "ordinary errors > 0.1%")
 	}
-	if cfg.injectFaults && (summary.FaultsScheduled == 0 || summary.FaultsRecovered != summary.FaultsScheduled) {
+	if cfg.injectFaults && !faultTotals.qualified() {
 		qualification = append(qualification, "unconfirmed injected recovery")
 	}
-	if summary.LastQueue["QUEUED"]+summary.LastQueue["ACTIVE"]+summary.LastQueue["FOLLOWUPS"] != 0 {
-		qualification = append(qualification, "nonempty queues after drain")
-	}
+	cleanup := s.soakCleanup
+	qualification = append(qualification, cleanup.qualificationFailures(fenceFailures)...)
 	for _, key := range []string{"run-coordinator", "ahp-vm-runtime"} {
 		proc, ok := summary.Processes[key]
 		if !ok || proc.Final.FD > proc.Initial.FD+15 || proc.Final.Goroutines > proc.Initial.Goroutines+15 {
@@ -297,18 +416,20 @@ func runSoak(ctx context.Context, s *stand, cfg sessionConfig, rate float64, lan
 	}
 	if err := writeJSONFile(filepath.Join(c.dir, "qualification.json"), map[string]any{
 		"qualified": len(qualification) == 0, "reasons": qualification, "upstream_p2_rate": rate,
+		"normal_attempts": len(normalRows), "normal_errors": normalErrors, "worst_normal_error_fraction": worstNormalErrorRate,
+		"faults": faultTotals, "cold_fence_failures": fenceFailures,
 	}); err != nil {
 		return err
 	}
 
-	fmt.Printf("AHP_PROFILE_STAGE p4-soak planned=%d sent=%d completed=%d fault_recovered=%d/%d rate=%.3f errors=%v\n",
-		summary.Scheduled, summary.Offered, summary.Completed, summary.FaultsRecovered, summary.FaultsScheduled, summary.Rate, summary.Failure)
-	return nil
-}
-
-func previousEpoch(r requestResult) int64 {
-	if r.Executed == nil {
-		return 0
+	fmt.Printf("AHP_PROFILE_STAGE p4-soak planned=%d sent=%d completed=%d fault_intended=%d fault_accepted=%d fault_injected=%d fault_recovered=%d rate=%.3f errors=%v\n",
+		summary.Scheduled, summary.Offered, summary.Completed, faultTotals.Intended, faultTotals.Accepted,
+		faultTotals.Injected, faultTotals.Recovered, summary.Rate, summary.Failure)
+	if drainErr != nil {
+		return fmt.Errorf("P4 State drain: %w", drainErr)
 	}
-	return r.Executed.Epoch
+	if len(cleanup.ObservationErrors) != 0 {
+		return fmt.Errorf("P4 cleanup incomplete: %v", cleanup.ObservationErrors)
+	}
+	return nil
 }

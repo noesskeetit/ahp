@@ -14,17 +14,22 @@ platform/profiling/v41/run-vz.sh p1 /tmp/ahp-v41-p1
 platform/profiling/v41/run-vz.sh p2 /tmp/ahp-v41-p2
 platform/profiling/v41/run-vz.sh p3 /tmp/ahp-v41-p3
 platform/profiling/v41/run-vz.sh p4 /tmp/ahp-v41-p4 -- --rate "$healthy_p2_turns_per_second"
+AHP_LAB_MEMORY_MIB=24576 AHP_LAB_WORKER_MEMORY_MIB=10240 \
+  AHP_LAB_PG_DISK_MIB=5120 AHP_LAB_MINIO_DISK=1 \
+  platform/profiling/v41/run-vz.sh p5 /tmp/ahp-p5-15s -- --worker-claim-ttl=15s --mcp-transport=pooled
+platform/profiling/v41/run-vz.sh fcmax /tmp/ahp-fc24 -- --fc-lanes=24 --mcp-transport=pooled
 platform/profiling/v41/run-vz.sh all-fc /tmp/ahp-v41-fc
 ```
 
 Each invocation needs a new evidence directory. It creates a fresh PostgreSQL cluster and MinIO store. Use separate P1–P4 invocations to reset storage between phases. Combined `all-process` and `all-fc` are available. A shortened command such as `p1 ... -- --quick 3s --seed 0` is suitable for diagnostics. `build-linux.sh <assembled module> <new binary directory>` can compile once. Set `AHP_LAB_BIN_DIR` to reuse that directory, or `AHP_LAB_ASSEMBLY` to use a preassembled module. The latter is required when invoking this script from an assembled tree without a matching prebuilt binary directory.
 
-Build the assembled sources from a clean product revision. The build embeds that revision in each run manifest. When invoking the builder from a source archive without Git metadata, set `AHP_LAB_PRODUCT_SHA` to its full commit SHA.
+Build the assembled sources from a clean revision. `AHP_LAB_PRODUCT_SHA` identifies the product code and `AHP_LAB_PROFILING_SHA` identifies the measurement code. Both default to the checkout SHA. To reproduce a profiler-only change, pass the distinct SHAs and verify that the product tree matches the product SHA before assembly.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `AHP_LAB_CPU` | 10 | VM vCPUs, at least 8 |
 | `AHP_LAB_MEMORY_MIB` | 16384 | VM RAM, at least 12288 |
+| `AHP_LAB_WORKER_MEMORY_MIB` | 2048 | P5 process worker memory limit, reserving at least 10240 MiB of VM RAM for the rest of the lab |
 | `AHP_LAB_PG_DISK_MIB` | 1280 | Maximum size of the sparse virtio disk |
 | `AHP_LAB_MINIO_DISK` | 0 | Set to 1 to put MinIO on the same bounded ext4 device as PostgreSQL and runtime slots |
 | `AHP_LAB_TIMEOUT_SEC` | 14400 | Host VM timeout in seconds with an earlier guest timeout for evidence transfer |
@@ -40,7 +45,7 @@ The launcher reuses the existing acceptance artifacts and checks the input diges
 | Component | Cgroup v2 CPU quota | Memory limit | Swap |
 | --- | ---: | ---: | --- |
 | State, Tools, Coordinator, Runtime | 4 vCPU | 4 GiB | 0 |
-| Process workers | 2 vCPU | 2 GiB | 0 |
+| Process workers | 2 vCPU | 2 GiB by default, configurable in P5 | 0 |
 | PostgreSQL | 2 vCPU | 4 GiB | 0 |
 | MinIO | 1 vCPU | 1 GiB | 0 |
 
@@ -55,3 +60,7 @@ MinIO defaults to a separate 768 MiB tmpfs. Those storage timings reflect the me
 `state-finish-commits.tsv` records the session ID, finished turn sequence, promoted turn sequence (zero when absent), and Linux host monotonic nanoseconds immediately after the State API gets a successful PostgreSQL `COMMIT` response. Join it to `turns.jsonl` on the session ID and turn sequence. `durable_verified_ns` records the client's later verification of the terminal journal and MCP effects. Firecracker's tool durations use the guest's clock and are reported separately.
 
 For a matched P4 control, pass `--inject-faults=false` with the same rate, lane count and duration as the fault run. Run `run-vz.sh fc2 <new evidence directory> -- --fc-lanes 16 --inject-faults=false` to isolate the 16-guest control. The fault variant uses `--inject-faults=true`. The manifest records the effective fault mode for each run.
+
+For the v4.2.2 P4 pair, pass `--max-lanes 32` and the same `--rate` to both fault modes. Use fresh storage per run. The wider set of warm conversations makes this a different workload from the earlier eight-lane pair.
+
+P5 adds a closed-loop ladder for long turns. Run the 3-second and 15-second worker claim and heartbeat TTLs separately. A successful rung includes the return through SSE and the expected durable tool effects. Check the observed State and SSE concurrency alongside the configured lane count. Firecracker `fcmax` reports actual guests and PSS at the selected rung. Any host sizing calculation based on that PSS remains an estimate.

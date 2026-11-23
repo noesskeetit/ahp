@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/ahp-platform/ahp/pkg/contracts/journal"
+	"github.com/jackc/pgx/v5"
 )
 
 func seedSessions(ctx context.Context, s *stand, count int) error {
@@ -131,4 +133,133 @@ func finalLiveState(s *stand) map[string]int64 {
 		}
 	}
 	return out
+}
+
+type soakStateJobs struct {
+	Queued         int64 `json:"queued"`
+	Active         int64 `json:"active"`
+	ExpiredActive  int64 `json:"expired_active"`
+	Followups      int64 `json:"followups"`
+	FollowupEvents int64 `json:"unpromoted_followup_events"`
+}
+
+func (j soakStateJobs) empty() bool {
+	return j.Queued+j.Active+j.Followups+j.FollowupEvents == 0
+}
+
+func (s *stand) soakStateJobs(ctx context.Context) (soakStateJobs, error) {
+	var jobs soakStateJobs
+	err := s.PG.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE status='QUEUED'),
+		       count(*) FILTER (WHERE status='ACTIVE'),
+		       count(*) FILTER (WHERE status='ACTIVE' AND lease_expires_at<=statement_timestamp()),
+		       coalesce(sum(followup_count),0),
+		       (SELECT count(*) FROM ahp_journal.session_events
+		        WHERE event_type='turn.followup' AND turn_seq IS NULL AND is_active)
+		FROM ahp_journal.sessions
+		WHERE execution_mode='vm_managed' AND (status IN ('QUEUED','ACTIVE') OR followup_count>0)`).
+		Scan(&jobs.Queued, &jobs.Active, &jobs.ExpiredActive, &jobs.Followups, &jobs.FollowupEvents)
+	return jobs, err
+}
+
+func (s *stand) waitSoakStateDrain(ctx context.Context, limit time.Duration) (*soakStateJobs, error) {
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	var coordinator *ownerProcess
+	for _, role := range s.roles {
+		if role.name == "run-coordinator" {
+			coordinator = role
+			break
+		}
+	}
+	if coordinator == nil {
+		return nil, errors.New("State drain has no run coordinator")
+	}
+	var last *soakStateJobs
+	for {
+		select {
+		case <-coordinator.done:
+			return last, errors.New("run coordinator exited before State drain completed")
+		default:
+		}
+		probe, stop := context.WithTimeout(ctx, 3*time.Second)
+		jobs, err := s.soakStateJobs(probe)
+		stop()
+		if err == nil {
+			last = &jobs
+			if jobs.empty() {
+				return last, nil
+			}
+		}
+		select {
+		case <-tick.C:
+		case <-coordinator.done:
+			return last, errors.New("run coordinator exited before State drain completed")
+		case <-ctx.Done():
+			return last, errors.Join(ctx.Err(), err)
+		}
+	}
+}
+
+type toolIntentStatus struct {
+	Tenant        string `json:"tenant"`
+	Deployment    string `json:"deployment"`
+	Subject       string `json:"subject"`
+	Session       string `json:"session_id"`
+	Key           string `json:"idempotency_key"`
+	StateStatus   string `json:"state_status"`
+	GatewayStatus string `json:"gateway_status"`
+}
+
+func (s *stand) pendingToolIntentStatuses(ctx context.Context) ([]toolIntentStatus, error) {
+	rows, err := s.PG.Query(ctx, `
+		SELECT i.tenant_id,s.deployment_id,s.subject_id,i.session_id,i.idempotency_key,i.status
+		FROM ahp_journal.tool_intents AS i
+		JOIN ahp_journal.sessions AS s USING(tenant_id,session_id)
+		WHERE i.status IN ('PREPARED','DISPATCHED','AWAITING_APPROVAL','AWAITING_AUTH')
+		ORDER BY i.tenant_id,i.session_id,i.idempotency_key`)
+	if err != nil {
+		return nil, err
+	}
+	intents, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (toolIntentStatus, error) {
+		var item toolIntentStatus
+		err := row.Scan(&item.Tenant, &item.Deployment, &item.Subject, &item.Session, &item.Key, &item.StateStatus)
+		item.GatewayStatus = "unobserved"
+		return item, err
+	})
+	if err != nil {
+		return intents, err
+	}
+	for i := range intents {
+		item := &intents[i]
+		err := s.ToolsPG.QueryRow(ctx, `
+			SELECT status FROM ahp_tools.operations WHERE tenant=$1 AND deployment=$2 AND subject=$3 AND key=$4`,
+			item.Tenant, item.Deployment, item.Subject, item.Key).Scan(&item.GatewayStatus)
+		if errors.Is(err, pgx.ErrNoRows) {
+			item.GatewayStatus = "missing"
+		} else if err != nil {
+			return intents, err
+		}
+	}
+	return intents, nil
+}
+
+func (s *stand) soakRuntimeStatuses(ctx context.Context) (map[string]int64, error) {
+	rows, err := s.RuntimePG.Query(ctx, "SELECT status,count(*) FROM ahp_runtime.executions GROUP BY status")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	statuses := make(map[string]int64)
+	for rows.Next() {
+		var status string
+		var n int64
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, err
+		}
+		statuses[status] = n
+	}
+	return statuses, rows.Err()
 }

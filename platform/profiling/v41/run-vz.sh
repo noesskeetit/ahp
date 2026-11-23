@@ -4,7 +4,7 @@ umask 077
 base="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 phase="${1:-capabilities}"
 case "$phase" in
-    capabilities|smoke|p0|p1|p2|p3|p4|fc1|fc2|all-process|all-fc) ;;
+    capabilities|smoke|p0|p1|p2|p3|p4|p5|fc1|fc2|fcmax|all-process|all-fc) ;;
     *) echo "Unknown lab phase: $phase" >&2; exit 64 ;;
 esac
 if [[ "$(uname -sm)" != 'Darwin arm64' ]]; then
@@ -33,15 +33,25 @@ memory="${AHP_LAB_MEMORY_MIB:-16384}"
 disk="${AHP_LAB_PG_DISK_MIB:-1280}"
 timeout="${AHP_LAB_TIMEOUT_SEC:-14400}"
 minio_disk="${AHP_LAB_MINIO_DISK:-0}"
+worker_memory="${AHP_LAB_WORKER_MEMORY_MIB:-2048}"
 if [[ "$minio_disk" != 0 && "$minio_disk" != 1 ]]; then
     echo 'AHP_LAB_MINIO_DISK must be 0 or 1' >&2
     exit 64
 fi
-for value in "$cpu" "$memory" "$disk" "$timeout"; do
+for value in "$cpu" "$memory" "$disk" "$timeout" "$worker_memory"; do
     [[ "$value" =~ ^[1-9][0-9]{0,5}$ ]] || { echo "Invalid lab integer: $value" >&2; exit 64; }
 done
 if (( cpu < 8 || cpu > $(sysctl -n hw.ncpu) || memory < 12288 || disk < 512 || timeout < 60 )); then
     echo "Lab sizing requires at least 8 vCPUs (at most the host CPU count), 12288 MiB RAM, 512 MiB disk and 60 s timeout" >&2
+    exit 64
+fi
+
+if (( worker_memory < 2048 || worker_memory > memory - 10240 )); then
+    echo 'Worker RAM must be at least 2048 MiB and leave at least 10240 MiB for the lab' >&2
+    exit 64
+fi
+if (( worker_memory != 2048 )) && [[ "$phase" != p5 ]]; then
+    echo 'Custom worker RAM is only supported in P5' >&2
     exit 64
 fi
 
@@ -134,8 +144,8 @@ node "$base/lab-init.sh" "$rootfs/init"
 chmod 0755 "$rootfs/init"
 chmod 0644 "$rootfs/usr/lib/postgresql18/pg_stat_statements.so" \
     "$rootfs/usr/share/postgresql18/extension/"pg_stat_statements*
-printf 'export AHP_PROFILE_PHASE=%s\nAHP_PROFILE_TIMEOUT=%s\nAHP_MINIO_DISK=%s\n' \
-    "$phase" "$((timeout - 40))" "$minio_disk" >"$rootfs/lab-options"
+printf 'export AHP_PROFILE_PHASE=%s\nAHP_PROFILE_TIMEOUT=%s\nAHP_MINIO_DISK=%s\nAHP_WORKER_MEMORY_BYTES=%s\n' \
+    "$phase" "$((timeout - 40))" "$minio_disk" "$((worker_memory * 1048576))" >"$rootfs/lab-options"
 python3 - "$rootfs/lab-run" "$phase" "$@" <<'PYTHON'
 import shlex
 import sys
@@ -174,7 +184,7 @@ if [[ "$phase" != capabilities ]]; then
         go version -m "$bins/$name" >>"$output/builds.txt"
     done
     case "$phase" in
-        fc1|fc2|all-fc)
+        fc1|fc2|fcmax|all-fc)
             mkdir -p "$rootfs/fc-root"/{bin,dev,proc,sbin,sys,tmp}
             node "$rootfs/bin/busybox" "$rootfs/fc-root/bin/busybox"
             node "$bins/ahp-v41-profile" "$rootfs/fc-root/bin/ahp-v41-profile"
@@ -208,7 +218,7 @@ PY
     go version
     printf 'vz_cpus=%s\nvz_memory_mib=%s\npg_disk_mib=%s\ntimeout_sec=%s\n' "$cpu" "$memory" "$disk" "$timeout"
     printf 'pg_storage=VZ virtio-blk uncached full-sync, sparse raw, ext4 noatime\n'
-    printf 'minio_on_shared_disk=%s\n' "$minio_disk"
+    printf 'minio_on_shared_disk=%s\nworker_memory_mib=%s\n' "$minio_disk" "$worker_memory"
     printf 'source_sha='; git -C "$base" rev-parse HEAD 2>/dev/null || printf 'unavailable\n'
     df -Pk "$output"
 } >"$output/host.txt"

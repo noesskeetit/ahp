@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ahp-platform/ahp/internal/runcoord"
 	"github.com/ahp-platform/ahp/pkg/contracts/journal"
 )
 
@@ -53,10 +54,48 @@ func (s *stand) stopExecution(ctx context.Context, target int, r *requestResult)
 	}
 	scope := s.Scope(target)
 	session := journal.ScopedSessionID(scope, r.Conversation)
-	started := monotonicNS()
-	fenceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	s.stopObservedExecution(ctx, r, runcoord.Execution{
+		Scope: scope, SessionID: session, LaunchTurnSeq: r.Executed.LaunchTurnSeq, Generation: r.Executed.Epoch,
+		ExecutionID: journal.DeterministicExecutionID(scope, session, r.Executed.LaunchTurnSeq, r.Executed.Epoch),
+	})
+}
+
+func (s *stand) stopColdSoakExecution(ctx context.Context, target int, r *requestResult) {
+	if r.AcceptedAt == 0 {
+		return
+	}
+	if r.Executed != nil && r.Failure == "" {
+		s.stopExecution(ctx, target, r)
+		return
+	}
+
+	// A timed-out turn may have had a replacement even if SSE never
+	// produced an output. Look up the published Runtime identity for this
+	// launch, including fenced generations, so we cannot choose a stale one.
+	lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	if err := s.Fence(fenceCtx, scope, session, r.Executed.LaunchTurnSeq, r.Executed.Epoch); err != nil {
+	scope := s.Scope(target)
+	execution := runcoord.Execution{Scope: scope, SessionID: journal.ScopedSessionID(scope, r.Conversation), LaunchTurnSeq: r.Seq}
+	var status string
+	err := s.RuntimePG.QueryRow(lookupCtx, `
+		SELECT execution_id,generation,status FROM ahp_runtime.executions
+		WHERE tenant_id=$1 AND deployment_id=$2 AND subject_id=$3 AND session_id=$4 AND launch_turn_seq=$5
+		ORDER BY generation DESC LIMIT 1`, scope.Tenant, scope.Deployment, scope.Subject, execution.SessionID, execution.LaunchTurnSeq).
+		Scan(&execution.ExecutionID, &execution.Generation, &status)
+	if err != nil {
+		r.FenceTimeError = "runtime_fence_owner_unobserved"
+		return
+	}
+	if status != "FENCED" {
+		s.stopObservedExecution(ctx, r, execution)
+	}
+}
+
+func (s *stand) stopObservedExecution(ctx context.Context, r *requestResult, execution runcoord.Execution) {
+	started := monotonicNS()
+	fenceCtx, cancel := context.WithTimeout(ctx, runtimeFenceTimeout)
+	defer cancel()
+	if err := s.dispatch.Fence(fenceCtx, execution); err != nil {
 		r.FenceTimeError = "runtime_fence_failed"
 		if r.Failure == "" {
 			r.Failure = r.FenceTimeError

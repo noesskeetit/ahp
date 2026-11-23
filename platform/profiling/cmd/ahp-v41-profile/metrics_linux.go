@@ -35,15 +35,18 @@ func percentiles(ns []int64) distribution {
 }
 
 type sample struct {
-	MonotonicNS  int64                    `json:"mono_ns"`
-	Processes    map[string]processSample `json:"processes"`
-	Cgroup       map[string]string        `json:"sut_cgroup"`
-	Queue        map[string]int64         `json:"state_sessions"`
-	DBWait       map[string]int64         `json:"db_wait"`
-	DBWaitDetail map[string]int64         `json:"db_wait_detail,omitempty"`
-	NotifyLocks  *int64                   `json:"pg_notify_lock_waiters,omitempty"`
-	Guests       guestSample              `json:"guest_processes"`
-	GuestCgroup  map[string]string        `json:"worker_cgroup"`
+	MonotonicNS    int64                    `json:"mono_ns"`
+	StateSampleAt  *time.Time               `json:"state_sample_at,omitempty"`
+	OpenSSE        *int                     `json:"open_measured_sse,omitempty"`
+	ExecutingTurns *int                     `json:"observed_executing_turns,omitempty"`
+	Processes      map[string]processSample `json:"processes"`
+	Cgroup         map[string]string        `json:"sut_cgroup"`
+	Queue          map[string]int64         `json:"state_sessions"`
+	DBWait         map[string]int64         `json:"db_wait"`
+	DBWaitDetail   map[string]int64         `json:"db_wait_detail,omitempty"`
+	NotifyLocks    *int64                   `json:"pg_notify_lock_waiters,omitempty"`
+	Guests         guestSample              `json:"guest_processes"`
+	GuestCgroup    map[string]string        `json:"worker_cgroup"`
 }
 
 type processSample struct {
@@ -409,13 +412,17 @@ func sampleResources(ctx context.Context, s *stand, c *collector, cgroup string)
 		}
 		statCtx, stop := context.WithTimeout(sampleCtx, 2*time.Second)
 		defer stop()
-		if rows, err := s.PG.Query(statCtx, "SELECT status, count(*) FROM ahp_journal.sessions GROUP BY status"); err == nil {
+		if rows, err := s.PG.Query(statCtx, "SELECT status, count(*), statement_timestamp() FROM ahp_journal.sessions GROUP BY status"); err == nil {
+			var sampledAt time.Time
 			for rows.Next() {
 				var key string
 				var n int64
-				if rows.Scan(&key, &n) == nil {
+				if rows.Scan(&key, &n, &sampledAt) == nil {
 					a.Queue[key] = n
 				}
+			}
+			if rows.Err() == nil && !sampledAt.IsZero() {
+				a.StateSampleAt = &sampledAt
 			}
 			rows.Close()
 		}
@@ -492,7 +499,7 @@ func sampleResources(ctx context.Context, s *stand, c *collector, cgroup string)
 	go func() {
 		defer close(done)
 		interval := 5 * time.Second
-		if strings.HasPrefix(c.phase, "fc2-") {
+		if strings.HasPrefix(c.phase, "fc2-") || strings.HasPrefix(c.phase, "fcmax-") {
 			interval = time.Second
 		}
 		tick := time.NewTicker(interval)

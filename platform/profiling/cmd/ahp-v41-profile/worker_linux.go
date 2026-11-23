@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -26,15 +27,16 @@ const (
 )
 
 type turnInput struct {
-	ID              string `json:"id"`
-	Padding         string `json:"padding"`
-	Tools           int    `json:"tools"`
-	ThinkMillis     int    `json:"think_millis"`
-	MCPMillis       int    `json:"mcp_millis"`
-	Large           bool   `json:"large"`
-	HoldForFollowup bool   `json:"hold_for_followup"`
-	Fault           bool   `json:"fault"`
-	MeasureExpiry   bool   `json:"measure_expiry,omitempty"`
+	ID               string `json:"id"`
+	Padding          string `json:"padding"`
+	Tools            int    `json:"tools"`
+	ThinkMillis      int    `json:"think_millis"`
+	MCPMillis        int    `json:"mcp_millis"`
+	Large            bool   `json:"large"`
+	HoldForFollowup  bool   `json:"hold_for_followup"`
+	Fault            bool   `json:"fault"`
+	MeasureExpiry    bool   `json:"measure_expiry,omitempty"`
+	WorkerClaimTTLMS int64  `json:"worker_claim_ttl_ms,omitempty"`
 }
 
 type turnOutput struct {
@@ -49,6 +51,8 @@ type turnOutput struct {
 	WarmHandoffNS        int64   `json:"warm_handoff_ns,omitempty"`
 	PreviousFinishRTTNS  int64   `json:"previous_finish_rtt_ns,omitempty"`
 	ExpiredProofRejected bool    `json:"expired_proof_rejected,omitempty"`
+	WorkerClaimTTLMS     int64   `json:"worker_claim_ttl_ms,omitempty"`
+	NativeHistoryBytes   int     `json:"native_history_bytes,omitempty"`
 }
 
 type workerClock struct {
@@ -107,19 +111,24 @@ func runWorkerTurns(ctx context.Context, store *state.Client, tools *sdktools.Cl
 	if err != nil {
 		return fmt.Errorf("worker bootstrap: %w", err)
 	}
+	ttl, admitted, err := workerLaunchTTL(ctx, store, boot)
+	if err != nil {
+		return err
+	}
 	first, err := store.ClaimVMTurn(ctx, boot.SessionID, journal.VMTurnClaimRequest{
 		TurnSeq: boot.LaunchTurnSeq, Generation: boot.Generation, ExecutionID: boot.ExecutionID,
-		TTLMilliseconds: workerClaimTTL.Milliseconds(),
+		TTLMilliseconds: ttl.Milliseconds(),
 	})
 	if err != nil {
 		return fmt.Errorf("worker claim: %w", err)
 	}
 	clock := workerClock{start: monotonicNS()}
-	if first.ToolLeaseProof == "" || first.Worker != boot.ExecutionID || first.SessionID != boot.SessionID {
+	if first.ToolLeaseProof == "" || first.Worker != boot.ExecutionID || first.SessionID != boot.SessionID ||
+		first.InputSeq != boot.LaunchTurnSeq || (len(admitted) > 0 && !bytes.Equal(first.Input.Inline, admitted)) {
 		return errors.New("worker claim did not return the assigned execution and proof")
 	}
 	lease := state.NewVMLease(first)
-	ctx, stop := store.RunVMHeartbeatWithControl(ctx, lease, workerClaimTTL, nil)
+	ctx, stop := store.RunVMHeartbeatWithControl(ctx, lease, ttl, nil)
 	defer stop()
 
 	// Read the last 25 historical records on entry, then consume new records
@@ -133,6 +142,9 @@ func runWorkerTurns(ctx context.Context, store *state.Client, tools *sdktools.Cl
 		}
 		if input.ID == "" || input.Tools < 0 || input.Tools > 2 || input.ThinkMillis < 0 || input.MCPMillis < 0 || input.MCPMillis > 1000 {
 			return fmt.Errorf("invalid workload for turn %d", turn.InputSeq)
+		}
+		if (len(admitted) > 0 || input.WorkerClaimTTLMS != 0) && input.WorkerClaimTTLMS != ttl.Milliseconds() {
+			return fmt.Errorf("turn %d does not match execution claim/heartbeat TTL %s", turn.InputSeq, ttl)
 		}
 		receipt, err := runWorkerTurn(ctx, store, tools, boot, first, lease, turn, input, &history, &clock)
 		if err != nil {
@@ -154,11 +166,68 @@ func runWorkerTurns(ctx context.Context, store *state.Client, tools *sdktools.Cl
 	}
 }
 
+func workerLaunchTTL(ctx context.Context, store *state.Client, boot journal.RuntimeBootstrap) (time.Duration, []byte, error) {
+	// Long-workload lanes are preseeded. Preserve the single-request claim path
+	// for ordinary cold sessions, which always launch at turn 1.
+	if boot.LaunchTurnSeq <= 1 {
+		return workerClaimTTL, nil, nil
+	}
+	page, err := store.GetEvents(ctx, boot.SessionID, boot.LaunchTurnSeq-1, 1, "")
+	if err != nil {
+		return 0, nil, fmt.Errorf("read admitted VM launch input: %w", err)
+	}
+	if len(page.Events) != 1 {
+		return 0, nil, errors.New("missing admitted VM launch input")
+	}
+	event := page.Events[0]
+	if event.Seq != boot.LaunchTurnSeq || event.TurnSeq != boot.LaunchTurnSeq || !event.Active ||
+		(event.Type != "turn.input" && event.Type != "turn.followup") {
+		return 0, nil, errors.New("unexpected admitted VM launch input")
+	}
+	var input turnInput
+	if err := json.Unmarshal(event.Payload.Inline, &input); err != nil {
+		return 0, nil, fmt.Errorf("decode admitted VM launch input: %w", err)
+	}
+	switch input.WorkerClaimTTLMS {
+	case 0:
+		return workerClaimTTL, nil, nil
+	case 3000, 15000:
+		return time.Duration(input.WorkerClaimTTLMS) * time.Millisecond, event.Payload.Inline, nil
+	default:
+		return 0, nil, errors.New("unsupported admitted VM claim TTL")
+	}
+}
+
+const p5HistoryEvents = 25
+const p5HistoryBytes = 100 << 10
+
+func readNativeP5History(ctx context.Context, store *state.Client, session string) (int, error) {
+	page, err := store.GetEvents(ctx, session, 0, p5HistoryEvents, "")
+	if err != nil {
+		return 0, err
+	}
+	if len(page.Events) != p5HistoryEvents {
+		return 0, fmt.Errorf("need %d native session history events, got %d", p5HistoryEvents, len(page.Events))
+	}
+	var bytesRead int
+	for i, event := range page.Events {
+		var entry struct{ Text string }
+		if event.Seq != int64(i+1) || event.Type != "bench.history" || json.Unmarshal(event.Payload.Inline, &entry) != nil {
+			return 0, fmt.Errorf("invalid native history event at sequence %d", event.Seq)
+		}
+		bytesRead += len(entry.Text)
+	}
+	if bytesRead != p5HistoryBytes {
+		return 0, fmt.Errorf("need %d native history bytes, got %d", p5HistoryBytes, bytesRead)
+	}
+	return bytesRead, nil
+}
+
 func runWorkerTurn(ctx context.Context, store *state.Client, tools *sdktools.Client, boot journal.RuntimeBootstrap,
 	first state.ClaimedTurn, lease *state.VMLease, turn state.ClaimedTurn, input turnInput, history *workerHistory, clock *workerClock,
 ) (journal.AppendReceipt, error) {
 	out := turnOutput{ID: input.ID, ExecutionID: boot.ExecutionID, LaunchTurnSeq: boot.LaunchTurnSeq,
-		Epoch: turn.Epoch, GuestToolNS: make([]int64, 0, input.Tools)}
+		Epoch: turn.Epoch, GuestToolNS: make([]int64, 0, input.Tools), WorkerClaimTTLMS: input.WorkerClaimTTLMS}
 	if clock.finishAt != 0 {
 		out.WarmHandoffNS = clock.start - clock.finishAt
 		out.PreviousFinishRTTNS = clock.finishRTT
@@ -183,6 +252,12 @@ func runWorkerTurn(ctx context.Context, store *state.Client, tools *sdktools.Cli
 	startedID := fmt.Sprintf("bench.started:%d:%d", turn.InputSeq, turn.Epoch)
 	if err := history.append(ctx, store, turn, startedID, "bench.started", "system", started); err != nil {
 		return journal.AppendReceipt{}, fmt.Errorf("record worker start: %w", err)
+	}
+	if input.WorkerClaimTTLMS != 0 && input.Tools > 0 {
+		out.NativeHistoryBytes, err = readNativeP5History(ctx, store, session)
+		if err != nil {
+			return journal.AppendReceipt{}, fmt.Errorf("read native workload history: %w", err)
+		}
 	}
 	if input.MeasureExpiry {
 		if turn.InputSeq != first.InputSeq {

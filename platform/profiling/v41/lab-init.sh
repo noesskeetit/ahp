@@ -101,7 +101,7 @@ make_group() {
     test "$($bb cat "$groups/$name/memory.swap.max")" = 0
 }
 make_group ahp_sut '400000 100000' 4294967296
-make_group ahp_workers '200000 100000' 2147483648
+make_group ahp_workers '200000 100000' "$AHP_WORKER_MEMORY_BYTES"
 make_group ahp_pg '200000 100000' 4294967296
 make_group ahp_minio '100000 100000' 1073741824
 $bb mkdir "$groups/ahp_fc"
